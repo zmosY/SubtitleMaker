@@ -65,6 +65,8 @@ class SubtitleEngine:
                         self.log("Видеокарта не обнаружена. Используем процессор.")
                 except Exception as e:
                     self.log(f"Не удалось инициализировать GPU ({e}). Переключаемся на процессор.")
+                    device = "cpu"
+                    compute_type = "int8"
             else:
                 self.log("Использование GPU отключено в настройках. Работаем на процессоре.")
             
