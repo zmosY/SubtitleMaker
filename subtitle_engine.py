@@ -36,8 +36,9 @@ def translate_text(text: str, source: str = 'ru', target: str = 'en', retries: i
 
 class SubtitleEngine:
     """Класс, инкапсулирующий логику генерации и перевода субтитров."""
-    def __init__(self, model_size="small", log_callback=None):
+    def __init__(self, model_size="small", use_gpu=True, log_callback=None):
         self.model_size = model_size
+        self.use_gpu = use_gpu
         self.log = log_callback if log_callback else print
         self.model = None
         self.stop_flag = False
@@ -48,12 +49,30 @@ class SubtitleEngine:
 
     def process_videos(self, video_paths: list, overwrite: bool = False):
         try:
-            self.log(f"Загрузка модели '{self.model_size}' (при первом запуске скачивается из интернета. Ждите...)...")
-            # Используем строго CPU, чтобы избежать ошибок с отсутствующими DLL от видеокарт (CUDA)
+            # Определяем устройство: GPU или CPU
+            device = "cpu"
+            compute_type = "int8"
+            
+            if self.use_gpu:
+                try:
+                    import ctranslate2
+                    cuda_devices = ctranslate2.get_cuda_device_count()
+                    if cuda_devices > 0:
+                        device = "cuda"
+                        compute_type = "float16"  # На GPU лучше использовать float16 для скорости
+                        self.log(f"Обнаружено {cuda_devices} GPU. Используем видеокарту для ускорения.")
+                    else:
+                        self.log("Видеокарта не обнаружена. Используем процессор.")
+                except Exception as e:
+                    self.log(f"Не удалось инициализировать GPU ({e}). Переключаемся на процессор.")
+            else:
+                self.log("Использование GPU отключено в настройках. Работаем на процессоре.")
+            
+            self.log(f"Загрузка модели '{self.model_size}' на {device.upper()} (при первом запуске скачивается из интернета. Ждите...)...")
             self.model = WhisperModel(
                 self.model_size, 
-                device="cpu", 
-                compute_type="int8",
+                device=device, 
+                compute_type=compute_type,
                 download_root="models"
             )
             self.log("Модель успешно загружена!")
