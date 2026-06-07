@@ -59,6 +59,10 @@ class App(ctk.CTk):
         self.checkbox_overwrite = ctk.CTkCheckBox(self.settings_frame, text="Перезаписывать существующие", variable=self.overwrite_var)
         self.checkbox_overwrite.grid(row=0, column=2, padx=20, pady=10)
 
+        self.gpu_var = ctk.BooleanVar(value=True)
+        self.checkbox_gpu = ctk.CTkCheckBox(self.settings_frame, text="Использовать видеокарту (GPU)", variable=self.gpu_var)
+        self.checkbox_gpu.grid(row=0, column=3, padx=20, pady=10)
+
         # Лог (Текстовое поле)
         self.log_textbox = ctk.CTkTextbox(self, width=660, height=250, state="disabled")
         self.log_textbox.pack(padx=20, pady=5, fill="both", expand=True)
@@ -122,7 +126,8 @@ class App(ctk.CTk):
         
         # Создаем и запускаем движок в отдельном потоке
         self.engine = SubtitleEngine(
-            model_size=self.model_var.get(), 
+            model_size=self.model_var.get(),
+            use_gpu=self.gpu_var.get(),
             log_callback=self.log_message
         )
         t = threading.Thread(target=self._process_thread, daemon=True)
