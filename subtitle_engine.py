@@ -96,13 +96,27 @@ class SubtitleEngine:
                 self.log(f"\n--> Обработка: {video_path.name}...")
                 
                 # Транскрибация (автоопределение языка)
-                segments, info = self.model.transcribe(
-                    str(video_path), 
-                    beam_size=3,
-                    vad_filter=True,
-                    vad_parameters=dict(min_silence_duration_ms=500),
-                    task="transcribe"
-                )
+                try:
+                    segments, info = self.model.transcribe(
+                        str(video_path), 
+                        beam_size=3,
+                        vad_filter=True,
+                        vad_parameters=dict(min_silence_duration_ms=500),
+                        task="transcribe"
+                    )
+                except Exception as transcribe_err:
+                    if "cublas" in str(transcribe_err).lower() or "cuda" in str(transcribe_err).lower():
+                        self.log(f"⚠️ Ошибка GPU при транскрибации: {transcribe_err}")
+                        self.log("Перезагрузка модели на CPU для продолжения работы...")
+                        self.model = WhisperModel(
+                            self.model_size, device="cpu", compute_type="int8", download_root="models"
+                        )
+                        segments, info = self.model.transcribe(
+                            str(video_path), beam_size=3, vad_filter=True,
+                            vad_parameters=dict(min_silence_duration_ms=500), task="transcribe"
+                        )
+                    else:
+                        raise
                 detected_lang = getattr(info, 'language', None) or 'unknown'
                 self.log(f"Обнаружен язык аудио: {detected_lang}")
                 
