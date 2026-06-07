@@ -77,7 +77,9 @@ class SubtitleEngine:
                 # Транскрибация (автоопределение языка)
                 segments, info = self.model.transcribe(
                     str(video_path), 
-                    beam_size=5, 
+                    beam_size=3,
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=500),
                     task="transcribe"
                 )
                 detected_lang = getattr(info, 'language', None) or 'unknown'
