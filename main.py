@@ -65,6 +65,7 @@ class App(ctk.CTk):
         self.videos_scroll = ctk.CTkScrollableFrame(self.left_panel)
         self.videos_scroll.grid(row=2, column=0, padx=10, pady=(5,10), sticky="nsew")
         self.videos_scroll.grid_columnconfigure(0, weight=1)
+        self.videos_scroll.bind("<Configure>", self._on_scroll_configure)
 
         self.right_panel = ctk.CTkFrame(self)
         self.right_panel.grid(row=0, column=1, sticky="nsew", padx=(5,10), pady=10)
@@ -146,52 +147,105 @@ class App(ctk.CTk):
         ctk.CTkButton(item, text="✕", command=remove, width=25, height=25, fg_color="#ef4444", hover_color="#dc2626").grid(row=0, column=2, padx=(5,0))
         self.video_widgets[video_path] = item
 
+    _TILE_W = 160   # ширина превью в плитке
+    _TILE_H = 100   # высота превью в плитке
+    _TILE_GAP = 8   # зазор между плитками
+
     def _add_video_card(self, video_path: str, path: Path, has_srt: bool):
-        """Карточка с превью-изображением для режима предпросмотра."""
-        card = ctk.CTkFrame(self.videos_scroll, fg_color="#1e1e1e", border_width=1, border_color="#3a3a3a", corner_radius=8)
-        card.pack(fill="x", pady=4, padx=5)
-        card.grid_columnconfigure(1, weight=1)
+        """Плитка с превью для режима предпросмотра (grid-сетка)."""
+        tile = ctk.CTkFrame(self.videos_scroll, fg_color="#1e1e1e",
+                            border_width=1, border_color="#3a3a3a", corner_radius=8)
 
         def on_click():
             self.selected_video_path = video_path
             self.preview_title.configure(text=f"📝 {path.name}")
             self._load_subtitle(video_path)
 
-        # Превью-изображение (CTkButton — чтобы клик работал в CustomTkinter)
+        # --- Контейнер для превью (чтобы можно было наложить бейдж) ---
+        thumb_holder = ctk.CTkFrame(tile, fg_color="transparent",
+                                    width=self._TILE_W, height=self._TILE_H)
+        thumb_holder.pack(padx=8, pady=(8,2))
+        thumb_holder.pack_propagate(False)
+
+        # Превью-изображение
         thumb_img = self._load_thumbnail(video_path)
         thumb_btn = ctk.CTkButton(
-            card, image=thumb_img, text="", command=on_click,
-            width=142, height=80, fg_color="#2a2a2a", hover_color="#3a3a3a",
+            thumb_holder, image=thumb_img, text="", command=on_click,
+            fg_color="#2a2a2a", hover_color="#3a3a3a",
             corner_radius=6, border_width=0, cursor="hand2"
         )
-        thumb_btn.grid(row=0, column=0, rowspan=2, padx=(8,10), pady=8)
+        thumb_btn.place(x=0, y=0, relwidth=1, relheight=1)
 
-        # Название файла (кликабельная кнопка)
-        name_btn = ctk.CTkButton(
-            card, text=path.name, command=on_click,
-            anchor="w", fg_color="transparent", hover_color="#2a2a2a",
-            font=ctk.CTkFont(size=13, weight="bold"), height=20,
-            border_width=0, cursor="hand2"
+        # Бейдж статуса — правый нижний угол превью
+        badge_text = "✅" if has_srt else "✕"
+        badge_color = "#4ade80" if has_srt else "#ef4444"
+        badge = ctk.CTkLabel(
+            thumb_holder, text=badge_text,
+            fg_color="#222222", text_color=badge_color,
+            corner_radius=5, width=26, height=26,
+            font=ctk.CTkFont(size=14)
         )
-        name_btn.grid(row=0, column=1, sticky="ew", pady=(12,0))
+        badge.place(relx=1.0, rely=1.0, anchor="se", x=-4, y=-4)
 
-        # Статус
-        status_text = "✅ Субтитры готовы" if has_srt else "⏳ Ожидает обработки"
-        ctk.CTkLabel(card, text=status_text, text_color="#4ade80" if has_srt else "#94a3b8",
-                     font=ctk.CTkFont(size=11), anchor="w").grid(row=1, column=1, sticky="w", pady=(2,10))
-
-        # Кнопка удаления
+        # Кнопка удаления — правый верхний угол превью
         def remove():
             if video_path in self.files_to_process:
                 self.files_to_process.remove(video_path)
-            card.destroy()
+            tile.destroy()
             if self.selected_video_path == video_path:
                 self._clear_preview()
-        ctk.CTkButton(card, text="✕", command=remove, width=26, height=26,
-                      fg_color="transparent", hover_color="#ef4444", text_color="#888",
-                      corner_radius=6, cursor="hand2").grid(row=0, column=2, rowspan=2, padx=(5,8))
+            self._reflow_tiles()
+        rm_btn = ctk.CTkButton(
+            thumb_holder, text="✕", command=remove,
+            width=22, height=22, fg_color="#cc3333", hover_color="#ff4444",
+            text_color="white", corner_radius=4, border_width=0,
+            font=ctk.CTkFont(size=11), cursor="hand2"
+        )
+        rm_btn.place(relx=1.0, rely=0.0, anchor="ne", x=-3, y=3)
 
-        self.video_widgets[video_path] = card
+        # Название файла под превью
+        display_name = path.name if len(path.name) <= 24 else path.stem[:20] + '…'
+        name_label = ctk.CTkLabel(
+            tile, text=display_name,
+            font=ctk.CTkFont(size=11),
+            anchor="center", wraplength=self._TILE_W - 10,
+            text_color="#cccccc", cursor="hand2"
+        )
+        name_label.pack(padx=4, pady=(2, 8), fill="x")
+        name_label.bind("<Button-1>", lambda e: on_click())
+
+        self.video_widgets[video_path] = tile
+
+    def _reflow_tiles(self):
+        """Перекомпоновывает плитки в grid-сетку с динамическим числом колонок."""
+        if self.view_mode_var.get() != "👁️ Превью":
+            return
+        tiles = [t for t in self.video_widgets.values() if t.winfo_exists()]
+        if not tiles:
+            return
+
+        # Вычисляем число колонок по доступной ширине
+        avail_w = self.videos_scroll.winfo_width() - 20  # отступы
+        tile_step = self._TILE_W + self._TILE_GAP * 2
+        cols = max(1, avail_w // tile_step)
+
+        # Сбрасываем геометрию для всех плиток
+        for tile in tiles:
+            tile.grid_forget()
+
+        # Настраиваем колонки с равным весом
+        for c in range(cols):
+            self.videos_scroll.grid_columnconfigure(c, weight=1, uniform="tile")
+        for i, tile in enumerate(tiles):
+            row = i // cols
+            col = i % cols
+            tile.grid(row=row, column=col, padx=self._TILE_GAP // 2,
+                      pady=self._TILE_GAP // 2, sticky="nsew")
+
+    def _on_scroll_configure(self, event):
+        """Перекомпоновка плиток при изменении размера."""
+        if self.view_mode_var.get() == "👁️ Превью":
+            self._reflow_tiles()
 
     def _load_thumbnail(self, video_path: str):
         """Загружает или создаёт превью для видео с кешированием.
@@ -243,10 +297,10 @@ class App(ctk.CTk):
 
         if thumb_path.exists():
             pil_img = Image.open(thumb_path)
-            return ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(142, 80))
+            return ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(self._TILE_W, self._TILE_H))
         else:
-            placeholder = Image.new('RGB', (142, 80), color='#3a3a3a')
-            return ctk.CTkImage(light_image=placeholder, dark_image=placeholder, size=(142, 80))
+            placeholder = Image.new('RGB', (self._TILE_W, self._TILE_H), color='#3a3a3a')
+            return ctk.CTkImage(light_image=placeholder, dark_image=placeholder, size=(self._TILE_W, self._TILE_H))
 
     def _load_subtitle(self, video_path: str):
         path = Path(video_path)
@@ -282,6 +336,10 @@ class App(ctk.CTk):
         
         # Применяем режим - value содержит выбранное значение из segmented button
         self._apply_view_mode_layout(value)
+        # После добавления всех элементов перекомпоновываем плитки (для preview)
+        if value == "👁️ Превью":
+            self.update_idletasks()
+            self._reflow_tiles()
     
     def _apply_view_mode_layout(self, mode_value=None):
         """Применяет текущий режим отображения к интерфейсу."""
@@ -318,6 +376,7 @@ class App(ctk.CTk):
                 self._add_video_item(f)
         if files:
             self.log_message(f"Добавлено: {len(files)}")
+        self._reflow_tiles()
 
     def select_folder(self):
         folder = filedialog.askdirectory(title="Папка с видео")
@@ -331,6 +390,7 @@ class App(ctk.CTk):
                     self._add_video_item(v)
                     count += 1
             self.log_message(f"Найдено: {count}")
+        self._reflow_tiles()
 
     def start_processing(self):
         if not self.files_to_process or self.is_running:
@@ -364,6 +424,7 @@ class App(ctk.CTk):
             self._add_video_item(v)
         if self.selected_video_path:
             self._load_subtitle(self.selected_video_path)
+        self._reflow_tiles()
 
     def stop_processing(self):
         if self.engine and self.is_running:
