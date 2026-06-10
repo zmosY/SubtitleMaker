@@ -6,6 +6,7 @@ import pyperclip
 import hashlib
 import subprocess
 import os
+import time
 from PIL import Image
 from subtitle_engine import SubtitleEngine
 
@@ -86,26 +87,71 @@ class App(ctk.CTk):
         self.preview_box = ctk.CTkTextbox(self.right_panel, state="disabled", font=ctk.CTkFont(family="Consolas", size=10))
         self.preview_box.grid(row=2, column=0, padx=10, pady=(5,10), sticky="nsew")
 
-        self.bottom = ctk.CTkFrame(self)
-        self.bottom.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0,10))
-        
-        ctk.CTkLabel(self.bottom, text="Модель:").grid(row=0, column=0, padx=(10,5), pady=10)
-        self.model_var = ctk.StringVar(value="small")
-        ctk.CTkOptionMenu(self.bottom, variable=self.model_var, values=["tiny","base","small","medium","large-v3"], width=90).grid(row=0, column=1, padx=5, pady=10)
-        self.overwrite_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(self.bottom, text="Перезапись", variable=self.overwrite_var, width=120).grid(row=0, column=2, padx=10, pady=10)
-        self.gpu_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(self.bottom, text="GPU", variable=self.gpu_var, width=70).grid(row=0, column=3, padx=10, pady=10)
-        
-        ctrl_frame = ctk.CTkFrame(self.bottom, fg_color="transparent")
-        ctrl_frame.grid(row=0, column=4, padx=(20,10), pady=10)
-        self.btn_start = ctk.CTkButton(ctrl_frame, text="▶ Старт", command=self.start_processing, fg_color="green", width=90)
-        self.btn_start.pack(side="left", padx=(0,5))
-        self.btn_stop = ctk.CTkButton(ctrl_frame, text="⏹ Стоп", command=self.stop_processing, fg_color="red", state="disabled", width=90)
-        self.btn_stop.pack(side="left", padx=(5,0))
+        # --- Нижняя панель: прогресс + кнопки + доп.настройки ---
+        self.bottom_frame = ctk.CTkFrame(self)
+        self.bottom_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(0,5))
 
-        self.log_box = ctk.CTkTextbox(self, height=100, state="disabled", font=ctk.CTkFont(size=9))
-        self.log_box.grid(row=2, column=0, columnspan=2, padx=10, pady=(0,10), sticky="ew")
+        # === Верхняя строка: всегда видна ===
+        self.bar_row = ctk.CTkFrame(self.bottom_frame, fg_color="transparent")
+        self.bar_row.pack(fill="x", padx=6, pady=(6,2))
+
+        # Прогресс-бар
+        self.progress_bar = ctk.CTkProgressBar(self.bar_row, height=14, corner_radius=7,
+                                                progress_color="#4a90d9",
+                                                fg_color="#2a2a2a")
+        self.progress_bar.set(0)
+        self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0,10))
+
+        # Проценты + время
+        self.progress_label = ctk.CTkLabel(self.bar_row, text="0%  --:--",
+                                           width=80, font=ctk.CTkFont(size=12),
+                                           anchor="center")
+        self.progress_label.pack(side="left", padx=(0,12))
+
+        # Кнопки Старт / Стоп
+        ctrl_frame = ctk.CTkFrame(self.bar_row, fg_color="transparent")
+        ctrl_frame.pack(side="left")
+        self.btn_start = ctk.CTkButton(ctrl_frame, text="▶ Старт", command=self.start_processing,
+                                       fg_color="green", width=78, height=28)
+        self.btn_start.pack(side="left", padx=(0,4))
+        self.btn_stop = ctk.CTkButton(ctrl_frame, text="⏹ Стоп", command=self.stop_processing,
+                                      fg_color="red", state="disabled", width=78, height=28)
+        self.btn_stop.pack(side="left")
+
+        # Кнопка «Дополнительно»
+        self.advanced_visible = False
+        self.btn_advanced = ctk.CTkButton(
+            self.bar_row, text="⚙ Дополнительно ▼", command=self._toggle_advanced,
+            width=148, height=28, fg_color="transparent", border_width=1,
+            border_color="#555", text_color="#aaa", hover_color="#2a2a2a",
+            font=ctk.CTkFont(size=11), cursor="hand2"
+        )
+        self.btn_advanced.pack(side="right", padx=(8,0))
+
+        # === Скрываемая панель доп.настроек ===
+        self.advanced_frame = ctk.CTkFrame(self.bottom_frame, fg_color="transparent")
+
+        # Строка настроек: модель, перезапись, GPU
+        settings_row = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
+        settings_row.pack(fill="x", padx=8, pady=(6,2))
+
+        ctk.CTkLabel(settings_row, text="Модель:", font=ctk.CTkFont(size=12)).pack(side="left", padx=(0,4))
+        self.model_var = ctk.StringVar(value="small")
+        ctk.CTkOptionMenu(settings_row, variable=self.model_var,
+                          values=["tiny", "base", "small", "medium", "large-v3"],
+                          width=90, height=26).pack(side="left", padx=(0,15))
+        self.overwrite_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(settings_row, text="Перезапись", variable=self.overwrite_var,
+                        height=26, font=ctk.CTkFont(size=12)).pack(side="left", padx=(0,10))
+        self.gpu_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(settings_row, text="GPU", variable=self.gpu_var,
+                        height=26, font=ctk.CTkFont(size=12)).pack(side="left")
+
+        # Лог (консоль)
+        self.log_box = ctk.CTkTextbox(self.advanced_frame, height=90,
+                                      state="disabled", font=ctk.CTkFont(family="Consolas", size=9))
+        self.log_box.pack(fill="x", padx=8, pady=(4,8))
+
         self.log_message("Готово! Выберите видео для работы.")
 
     def log_message(self, msg):
@@ -392,10 +438,44 @@ class App(ctk.CTk):
             self.log_message(f"Найдено: {count}")
         self._reflow_tiles()
 
+    def _toggle_advanced(self):
+        """Разворачивает/сворачивает панель доп.настроек."""
+        self.advanced_visible = not self.advanced_visible
+        if self.advanced_visible:
+            self.advanced_frame.pack(fill="x", after=self.bar_row)
+            self.btn_advanced.configure(text="⚙ Дополнительно ▲")
+        else:
+            self.advanced_frame.pack_forget()
+            self.btn_advanced.configure(text="⚙ Дополнительно ▼")
+
+    def update_progress(self, fraction: float):
+        """Обновляет прогресс-бар (fraction 0.0–1.0) и метку с % + примерным временем."""
+        fraction = min(1.0, max(0.0, fraction))
+        self.progress_bar.set(fraction)
+        pct = int(fraction * 100)
+        if pct > 0 and self._start_time:
+            elapsed = time.time() - self._start_time
+            if elapsed > 2:
+                eta = elapsed / fraction * (1 - fraction)  # секунд до конца
+                if eta >= 120:
+                    label = f"{pct}%  ~{int(eta // 60)} мин"
+                elif eta >= 60:
+                    label = f"{pct}%  ~1 мин"
+                else:
+                    label = f"{pct}%  ~{int(eta)} с"
+            else:
+                label = f"{pct}%  --:--"
+        else:
+            label = f"{pct}%  --:--"
+        self.progress_label.configure(text=label)
+
     def start_processing(self):
         if not self.files_to_process or self.is_running:
             return
         self.is_running = True
+        self.progress_bar.set(0)
+        self.progress_label.configure(text="0%  --:--")
+        self._start_time = time.time()
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
         self.btn_select_files.configure(state="disabled")
@@ -405,7 +485,8 @@ class App(ctk.CTk):
 
     def _process_thread(self):
         try:
-            self.engine.process_videos(self.files_to_process, self.overwrite_var.get())
+            self.engine.process_videos(self.files_to_process, self.overwrite_var.get(),
+                                       progress_callback=lambda f: self.after(0, self.update_progress, f))
         except Exception as e:
             self.log_message(f"Ошибка: {e}")
         finally:
@@ -413,6 +494,8 @@ class App(ctk.CTk):
 
     def _on_finished(self):
         self.is_running = False
+        self.progress_bar.set(1)
+        self.progress_label.configure(text="100%  ✅ Готово")
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
         self.btn_select_files.configure(state="normal")

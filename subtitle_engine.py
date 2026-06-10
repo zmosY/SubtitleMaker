@@ -47,7 +47,7 @@ class SubtitleEngine:
         if self.stop_flag:
             raise InterruptedError("Процесс отменен пользователем.")
 
-    def process_videos(self, video_paths: list, overwrite: bool = False):
+    def process_videos(self, video_paths: list, overwrite: bool = False, progress_callback=None):
         try:
             # Определяем устройство: GPU или CPU
             device = "cpu"
@@ -82,7 +82,9 @@ class SubtitleEngine:
             self.log(f"Ошибка загрузки модели: {e}")
             return
 
-        for p in video_paths:
+        total = len(video_paths)
+
+        for idx, p in enumerate(video_paths, start=1):
             try:
                 self.check_stop()
                 video_path = Path(p)
@@ -91,10 +93,18 @@ class SubtitleEngine:
 
                 if not overwrite and srt_ru.exists() and srt_en.exists():
                     self.log(f"--> Пропуск {video_path.name} (субтитры уже существуют).")
+                    if progress_callback:
+                        progress_callback(idx / total)
                     continue
 
                 self.log(f"\n--> Обработка: {video_path.name}...")
-                
+
+                # Функция для вычисления общего прогресса (0.0 — 1.0)
+                def _report(seg_progress: float):
+                    if progress_callback:
+                        overall = (idx - 1 + seg_progress) / total
+                        progress_callback(overall)
+
                 # Транскрибация (автоопределение языка)
                 try:
                     segments, info = self.model.transcribe(
@@ -150,9 +160,10 @@ class SubtitleEngine:
                     ru_lines.append(f"{i}\n{time_block}\n{text_ru}\n")
                     en_lines.append(f"{i}\n{time_block}\n{text_en}\n")
                     
-                    # Лог для понимания, что процесс идет
-                    if i % 10 == 0:
-                        self.log(f"Сгенерировано {i} строк субтитров...")
+                    # Сообщаем о прогрессе каждые 3 сегмента (плавное движение бара)
+                    if i % 3 == 0:
+                        # Оценка доли текущего видео: i / (i + 30) — асимптотически растёт к 1
+                        _report(i / (i + 30))
 
                 self.check_stop()
                 
@@ -164,6 +175,9 @@ class SubtitleEngine:
                     f.write("\n".join(en_lines))
                     
                 self.log(f"Успешно сохранено: {srt_ru.name} и {srt_en.name}.")
+
+                # Видео полностью обработано — точная позиция
+                _report(1.0)
 
             except InterruptedError as ie:
                 self.log(str(ie))
