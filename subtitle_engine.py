@@ -1,6 +1,7 @@
 import time
 from pathlib import Path
 import os
+import sys
 import imageio_ffmpeg
 import subprocess
 
@@ -35,12 +36,11 @@ def translate_text(text: str, source='ru', target='en', retries=3) -> str:
 
 class SubtitleEngine:
     def __init__(self, model_size="small", use_gpu=True, log_callback=None,
-                 azure_key="", azure_region="eastus"):
+                 deepgram_key=""):
         self.model_size = model_size
         self.use_gpu = use_gpu
         self.log = log_callback if log_callback else print
-        self.azure_key = azure_key
-        self.azure_region = azure_region
+        self.deepgram_key = deepgram_key
         self.model = None
         self.stop_flag = False
         self._gpu_failed = False   # запоминаем, что GPU однажды упал
@@ -60,8 +60,8 @@ class SubtitleEngine:
                 try:
                     import ctranslate2
                     if ctranslate2.get_cuda_device_count() > 0:
-                        device, ct = "cuda", "float16"
-                        self.log("GPU detected. Using GPU.")
+                        device, ct = "cuda", "int8_float16"
+                        self.log("GPU detected. Using GPU (int8_float16).")
                     else:
                         self.log("No GPU found. Using CPU.")
                 except Exception as e:
@@ -103,25 +103,43 @@ class SubtitleEngine:
         self.log(f"Audio language: {lang}")
         return segments, lang, _report
 
-    # --- Azure Speech ---
+    # --- Deepgram ---
 
-    def _transcribe_azure(self, video_path, progress_callback, idx, total):
-        import threading
+    def _ensure_deepgram_sdk(self):
+        """Пытается импортировать Deepgram-клиент, при неудаче — автоустановка."""
+        try:
+            from deepgram import DeepgramClient
+            return DeepgramClient
+        except ImportError:
+            self.log("Deepgram SDK not found. Installing deepgram-sdk...")
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "deepgram-sdk"],
+                capture_output=True, timeout=120
+            )
+            if result.returncode != 0:
+                err = result.stderr.decode()[:200]
+                self.log(f"Install failed: {err}")
+                self.log("Please run manually: pip install deepgram-sdk")
+                raise RuntimeError("deepgram-sdk install failed")
+            import importlib
+            importlib.invalidate_caches()
+            sys.modules.pop('deepgram', None)
+            from deepgram import DeepgramClient
+            self.log("Deepgram SDK installed successfully!")
+            return DeepgramClient
 
+    def _transcribe_deepgram(self, video_path, progress_callback, idx, total):
         def _report(seg_progress):
             if progress_callback:
                 progress_callback((idx - 1 + seg_progress) / total)
 
-        try:
-            import azure.cognitiveservices.speech as speechsdk
-        except ImportError:
-            self.log("Azure SDK not installed. Run: pip install azure-cognitiveservices-speech")
-            raise
+        DeepgramClient = self._ensure_deepgram_sdk()
 
-        if not self.azure_key:
-            self.log("Azure API Key missing. Open 'Advanced' and enter the key.")
-            raise ValueError("Azure API key is required")
+        if not self.deepgram_key:
+            self.log("Deepgram API Key missing. Open Advanced and enter the key.")
+            raise ValueError("Deepgram API key is required")
 
+        # Конвертируем видео в WAV (16kHz, mono)
         wav_path = video_path.with_suffix('.wav')
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
         self.log("Converting to WAV (16kHz, mono)...")
@@ -132,76 +150,83 @@ class SubtitleEngine:
         )
         _report(0.05)
 
-        speech_config = speechsdk.SpeechConfig(
-            subscription=self.azure_key, region=self.azure_region
+        client = DeepgramClient(api_key=self.deepgram_key)
+
+        with open(wav_path, "rb") as f:
+            buffer_data = f.read()
+
+        self.log("Sending to Deepgram Nova-3...")
+        response = client.listen.v1.media.transcribe_file(
+            request=buffer_data,
+            model="nova-3",
+            smart_format=True,
+            utterances=True,
+            detect_language=True,
         )
-        auto_config = speechsdk.languageconfig.AutoDetectSourceLanguageConfig(
-            languages=["ru-RU", "en-US"]
-        )
-        audio_config = speechsdk.AudioConfig(filename=str(wav_path))
-        recognizer = speechsdk.SpeechRecognizer(
-            speech_config=speech_config,
-            audio_config=audio_config,
-            auto_detect_source_language_config=auto_config
-        )
 
-        all_results = []
-        done_event = threading.Event()
-
-        def on_recognized(evt):
-            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                all_results.append(evt.result)
-                n = len(all_results)
-                if n % 5 == 0:
-                    _report(0.05 + min(0.85, n / (n + 50)) * 0.90)
-
-        def on_canceled(evt):
-            self.log(f"Azure: session cancelled ({evt.result.reason})")
-            done_event.set()
-
-        def on_stopped(evt):
-            done_event.set()
-
-        recognizer.recognized.connect(on_recognized)
-        recognizer.canceled.connect(on_canceled)
-        recognizer.session_stopped.connect(on_stopped)
-
-        self.log("Sending to Azure Speech...")
-        recognizer.start_continuous_recognition_async().get()
-        done_event.wait(timeout=3600)
-        recognizer.stop_continuous_recognition_async().get()
-
+        # Удаляем WAV
         try:
             wav_path.unlink()
         except Exception:
             pass
 
-        if not all_results:
-            self.log("Azure returned no results.")
-            raise RuntimeError("No results from Azure")
+        # Парсим результат
+        results = response.results
+        channel = results.channels[0]
+        detected_lang = channel.detected_language or ''
 
-        self.log(f"Got {len(all_results)} segments from Azure")
+        # Определяем язык
+        if 'ru' in detected_lang.lower():
+            lang = 'ru'
+        elif 'en' in detected_lang.lower():
+            lang = 'en'
+        else:
+            lang = 'unknown'
+        self.log(f"Detected language: {lang}")
 
-        class AzSegment:
+        class DgSegment:
             def __init__(self, start, end, text):
                 self.start = start
                 self.end = end
                 self.text = text
 
         segments = []
-        for r in all_results:
-            start = r.offset / 10_000_000
-            end = (r.offset + r.duration) / 10_000_000
-            text = r.text.strip()
-            if text:
-                segments.append(AzSegment(start, end, text))
+        # Используем utterances (если есть) или слова
+        if results.utterances:
+            for utt in results.utterances:
+                text = (utt.transcript or '').strip()
+                if text:
+                    segments.append(DgSegment(utt.start, utt.end, text))
+            self.log(f"Got {len(segments)} utterances from Deepgram")
+        else:
+            # Собираем из слов группами по ~10 слов
+            alt = channel.alternatives[0] if channel.alternatives else None
+            if not alt or not alt.words:
+                self.log("Deepgram returned no words.")
+                raise RuntimeError("No transcription from Deepgram")
+            words = alt.words
+            gs, gt = None, []
+            for w in words:
+                if gs is None:
+                    gs = w.start
+                gt.append(w.word)
+                if len(gt) >= 10:
+                    segments.append(DgSegment(gs, w.end, ' '.join(gt)))
+                    gs, gt = None, []
+            if gt:
+                segments.append(DgSegment(gs, words[-1].end, ' '.join(gt)))
+            self.log(f"Got {len(segments)} word-groups from Deepgram")
 
-        return segments, "unknown", _report
+        if not segments:
+            self.log("Deepgram returned no results.")
+            raise RuntimeError("No transcription from Deepgram")
+
+        return segments, lang, _report
 
     # --- Main loop ---
 
     def process_videos(self, video_paths, overwrite=False, progress_callback=None):
-        is_azure = self.model_size == "azure"
+        is_deepgram = self.model_size == "deepgram"
         total = len(video_paths)
 
         for idx, p in enumerate(video_paths, start=1):
@@ -219,8 +244,8 @@ class SubtitleEngine:
 
                 self.log(f"\nProcessing: {video_path.name}...")
 
-                if is_azure:
-                    segments, lang, _report = self._transcribe_azure(
+                if is_deepgram:
+                    segments, lang, _report = self._transcribe_deepgram(
                         video_path, progress_callback, idx, total)
                 else:
                     segments, lang, _report = self._transcribe_whisper(

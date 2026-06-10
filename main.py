@@ -139,7 +139,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(settings_row, text="Модель:", font=ctk.CTkFont(size=12)).pack(side="left", padx=(0,4))
         self.model_var = ctk.StringVar(value="small")
         self.model_menu = ctk.CTkOptionMenu(settings_row, variable=self.model_var,
-                          values=["tiny", "base", "small", "medium", "large-v3", "azure"],
+                          values=["tiny", "base", "small", "medium", "large-v3", "deepgram"],
                           width=100, height=26, command=self._on_model_changed)
         self.model_menu.pack(side="left", padx=(0,15))
         self.overwrite_var = ctk.BooleanVar(value=False)
@@ -149,16 +149,12 @@ class App(ctk.CTk):
         ctk.CTkCheckBox(settings_row, text="GPU", variable=self.gpu_var,
                         height=26, font=ctk.CTkFont(size=12)).pack(side="left")
 
-        # Azure-настройки (показываются только при выборе "azure")
-        self.azure_frame = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
-        ctk.CTkLabel(self.azure_frame, text="Azure Key:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0,4))
-        self.azure_key_var = ctk.StringVar()
-        ctk.CTkEntry(self.azure_frame, textvariable=self.azure_key_var, width=180,
-                     height=26, font=ctk.CTkFont(size=11), show="*").pack(side="left", padx=(0,10))
-        ctk.CTkLabel(self.azure_frame, text="Region:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0,4))
-        self.azure_region_var = ctk.StringVar(value="eastus")
-        ctk.CTkEntry(self.azure_frame, textvariable=self.azure_region_var, width=100,
-                     height=26, font=ctk.CTkFont(size=11)).pack(side="left")
+        # Deepgram-настройки (показываются только при выборе "deepgram")
+        self.deepgram_frame = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
+        ctk.CTkLabel(self.deepgram_frame, text="🔑 Deepgram API Key:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0,4))
+        self.deepgram_key_var = ctk.StringVar()
+        ctk.CTkEntry(self.deepgram_frame, textvariable=self.deepgram_key_var, width=280,
+                     height=26, font=ctk.CTkFont(size=11), show="*").pack(side="left")
         # Лог (консоль)
         self.log_box = ctk.CTkTextbox(self.advanced_frame, height=90,
                                       state="disabled", font=ctk.CTkFont(family="Consolas", size=9))
@@ -168,7 +164,7 @@ class App(ctk.CTk):
         self._load_config()
         # Автосохранение при изменении любой настройки
         for var in (self.model_var, self.overwrite_var, self.gpu_var,
-                    self.azure_key_var, self.azure_region_var):
+                    self.deepgram_key_var):
             var.trace_add("write", self._auto_save)
         self.lang_var.trace_add("write", self._auto_save)
         self.view_mode_var.trace_add("write", self._auto_save)
@@ -468,12 +464,12 @@ class App(ctk.CTk):
         self._reflow_tiles()
 
     def _on_model_changed(self, choice: str):
-        """Показывает/скрывает Azure-поля при выборе модели."""
-        if choice == "azure":
-            self.azure_frame.pack(fill="x", padx=8, pady=(0,2))
-            self.gpu_var.set(False)  # Azure не требует GPU
+        """Показывает/скрывает Deepgram-поле при выборе модели."""
+        if choice == "deepgram":
+            self.deepgram_frame.pack(fill="x", padx=8, pady=(0,2))
+            self.gpu_var.set(False)  # Deepgram не требует GPU
         else:
-            self.azure_frame.pack_forget()
+            self.deepgram_frame.pack_forget()
             self.gpu_var.set(True)   # Для локальных моделей GPU доступен
 
     def _toggle_advanced(self):
@@ -521,8 +517,7 @@ class App(ctk.CTk):
             model_size=self.model_var.get(),
             use_gpu=self.gpu_var.get(),
             log_callback=self.log_message,
-            azure_key=self.azure_key_var.get().strip(),
-            azure_region=self.azure_region_var.get().strip()
+            deepgram_key=self.deepgram_key_var.get().strip()
         )
         threading.Thread(target=self._process_thread, daemon=True).start()
 
@@ -558,8 +553,7 @@ class App(ctk.CTk):
             "model_size": self.model_var.get(),
             "use_gpu": self.gpu_var.get(),
             "overwrite": self.overwrite_var.get(),
-            "azure_key": self.azure_key_var.get(),
-            "azure_region": self.azure_region_var.get(),
+            "deepgram_key": self.deepgram_key_var.get(),
             "view_mode": self.view_mode_var.get(),
             "language": self.lang_var.get(),
             "window_geometry": self.geometry(),
@@ -589,10 +583,8 @@ class App(ctk.CTk):
             self.gpu_var.set(data["use_gpu"])
         if data.get("overwrite") is not None:
             self.overwrite_var.set(data["overwrite"])
-        if data.get("azure_key"):
-            self.azure_key_var.set(data["azure_key"])
-        if data.get("azure_region"):
-            self.azure_region_var.set(data["azure_region"])
+        if data.get("deepgram_key"):
+            self.deepgram_key_var.set(data["deepgram_key"])
         if data.get("view_mode"):
             self.view_mode_var.set(data["view_mode"])
         if data.get("language"):
@@ -602,9 +594,9 @@ class App(ctk.CTk):
 
         # После загрузки применяем layout под режим просмотра
         self._on_view_mode_changed(self.view_mode_var.get())
-        # Если выбрана azure — показываем Azure-поля
-        if self.model_var.get() == "azure":
-            self.azure_frame.pack(fill="x", padx=8, pady=(0,2))
+        # Если выбрана deepgram — показываем поле для ключа
+        if self.model_var.get() == "deepgram":
+            self.deepgram_frame.pack(fill="x", padx=8, pady=(0,2))
 
     def _on_close(self):
         """Сохраняет настройки и закрывает приложение."""
