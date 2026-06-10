@@ -43,6 +43,7 @@ class SubtitleEngine:
         self.azure_region = azure_region
         self.model = None
         self.stop_flag = False
+        self._gpu_failed = False   # запоминаем, что GPU однажды упал
 
     def check_stop(self):
         if self.stop_flag:
@@ -55,7 +56,7 @@ class SubtitleEngine:
 
         try:
             device, ct = "cpu", "int8"
-            if self.use_gpu:
+            if self.use_gpu and not self._gpu_failed:
                 try:
                     import ctranslate2
                     if ctranslate2.get_cuda_device_count() > 0:
@@ -87,6 +88,7 @@ class SubtitleEngine:
         except Exception as e:
             if "cublas" in str(e).lower() or "cuda" in str(e).lower():
                 self.log("GPU error, switching to CPU...")
+                self._gpu_failed = True  # запоминаем — больше не пробуем GPU
                 self.model = WhisperModel(self.model_size, device="cpu",
                                           compute_type="int8", download_root="models")
                 segments, info = self.model.transcribe(

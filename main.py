@@ -7,8 +7,12 @@ import hashlib
 import subprocess
 import os
 import time
+import json
 from PIL import Image
 from subtitle_engine import SubtitleEngine
+
+# Путь к файлу конфигурации
+CONFIG_PATH = Path(__file__).parent / "config.json"
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -57,11 +61,8 @@ class App(ctk.CTk):
         btn_frame = ctk.CTkFrame(self.left_panel, fg_color="transparent")
         btn_frame.grid(row=1, column=0, padx=10, pady=(0,5), sticky="ew")
         btn_frame.grid_columnconfigure(0, weight=1)
-        btn_frame.grid_columnconfigure(1, weight=1)
-        self.btn_select_files = ctk.CTkButton(btn_frame, text="Выбрать видео...", command=self.select_files, height=30)
-        self.btn_select_files.grid(row=0, column=0, padx=(0,5), pady=5, sticky="ew")
-        self.btn_select_folder = ctk.CTkButton(btn_frame, text="Выбрать папку...", command=self.select_folder, height=30)
-        self.btn_select_folder.grid(row=0, column=1, padx=(5,0), pady=5, sticky="ew")
+        self.btn_select_videos = ctk.CTkButton(btn_frame, text="📂 Выбрать видео...", command=self.select_files, height=32)
+        self.btn_select_videos.grid(row=0, column=0, padx=0, pady=5, sticky="ew")
 
         self.videos_scroll = ctk.CTkScrollableFrame(self.left_panel)
         self.videos_scroll.grid(row=2, column=0, padx=10, pady=(5,10), sticky="nsew")
@@ -162,6 +163,17 @@ class App(ctk.CTk):
         self.log_box = ctk.CTkTextbox(self.advanced_frame, height=90,
                                       state="disabled", font=ctk.CTkFont(family="Consolas", size=9))
         self.log_box.pack(fill="x", padx=8, pady=(4,8))
+
+        # Загружаем сохранённые настройки (должны быть после создания UI)
+        self._load_config()
+        # Автосохранение при изменении любой настройки
+        for var in (self.model_var, self.overwrite_var, self.gpu_var,
+                    self.azure_key_var, self.azure_region_var):
+            var.trace_add("write", self._auto_save)
+        self.lang_var.trace_add("write", self._auto_save)
+        self.view_mode_var.trace_add("write", self._auto_save)
+        # Автосохранение настроек при закрытии окна
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.log_message("Готово! Выберите видео для работы.")
 
@@ -426,27 +438,33 @@ class App(ctk.CTk):
             self.log_message("Нет данных для копирования")
 
     def select_files(self):
-        files = filedialog.askopenfilenames(title="Выберите видео", filetypes=(("Video","*.mp4 *.avi *.mkv *.mov"),("All","*.*")))
-        for f in files:
-            if f not in self.files_to_process:
-                self.files_to_process.append(f)
-                self._add_video_item(f)
+        """Одной кнопкой: если выбран файл — добавляет его, если папка — находит все видео в ней."""
+        # Сначала файлы; если пользователь нажмёт «Отмена», предложим выбрать папку
+        files = filedialog.askopenfilenames(
+            title="Выберите видеофайлы (или нажмите Отмена, чтобы выбрать папку)",
+            filetypes=(("Video","*.mp4 *.avi *.mkv *.mov"),("All","*.*"))
+        )
         if files:
-            self.log_message(f"Добавлено: {len(files)}")
-        self._reflow_tiles()
-
-    def select_folder(self):
-        folder = filedialog.askdirectory(title="Папка с видео")
-        if folder:
-            exts = ('.mp4','.avi','.mkv','.mov')
-            videos = [str(p) for p in Path(folder).iterdir() if p.suffix.lower() in exts]
             count = 0
-            for v in videos:
-                if v not in self.files_to_process:
-                    self.files_to_process.append(v)
-                    self._add_video_item(v)
+            for f in files:
+                if f not in self.files_to_process:
+                    self.files_to_process.append(f)
+                    self._add_video_item(f)
                     count += 1
-            self.log_message(f"Найдено: {count}")
+            self.log_message(f"Добавлено видео: {count}")
+        else:
+            # Пользователь нажал Отмена — предложим выбрать папку
+            folder = filedialog.askdirectory(title="Или выберите папку с видео")
+            if folder:
+                exts = ('.mp4', '.avi', '.mkv', '.mov')
+                videos = [str(p) for p in Path(folder).iterdir() if p.suffix.lower() in exts]
+                count = 0
+                for v in videos:
+                    if v not in self.files_to_process:
+                        self.files_to_process.append(v)
+                        self._add_video_item(v)
+                        count += 1
+                self.log_message(f"Найдено видео в папке: {count}")
         self._reflow_tiles()
 
     def _on_model_changed(self, choice: str):
@@ -456,6 +474,7 @@ class App(ctk.CTk):
             self.gpu_var.set(False)  # Azure не требует GPU
         else:
             self.azure_frame.pack_forget()
+            self.gpu_var.set(True)   # Для локальных моделей GPU доступен
 
     def _toggle_advanced(self):
         """Разворачивает/сворачивает панель доп.настроек."""
@@ -497,8 +516,7 @@ class App(ctk.CTk):
         self._start_time = time.time()
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
-        self.btn_select_files.configure(state="disabled")
-        self.btn_select_folder.configure(state="disabled")
+        self.btn_select_videos.configure(state="disabled")
         self.engine = SubtitleEngine(
             model_size=self.model_var.get(),
             use_gpu=self.gpu_var.get(),
@@ -523,8 +541,7 @@ class App(ctk.CTk):
         self.progress_label.configure(text="100%  ✅ Готово")
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
-        self.btn_select_files.configure(state="normal")
-        self.btn_select_folder.configure(state="normal")
+        self.btn_select_videos.configure(state="normal")
         for w in self.videos_scroll.winfo_children():
             w.destroy()
         self.video_widgets.clear()
@@ -533,6 +550,70 @@ class App(ctk.CTk):
         if self.selected_video_path:
             self._load_subtitle(self.selected_video_path)
         self._reflow_tiles()
+
+    # ─── Персистентность настроек ─────────────────────────────────
+    def _config_data(self) -> dict:
+        """Собирает текущие настройки в словарь."""
+        return {
+            "model_size": self.model_var.get(),
+            "use_gpu": self.gpu_var.get(),
+            "overwrite": self.overwrite_var.get(),
+            "azure_key": self.azure_key_var.get(),
+            "azure_region": self.azure_region_var.get(),
+            "view_mode": self.view_mode_var.get(),
+            "language": self.lang_var.get(),
+            "window_geometry": self.geometry(),
+        }
+
+    def _save_config(self):
+        """Сохраняет настройки в JSON-файл."""
+        try:
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(self._config_data(), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Config save error: {e}")
+
+    def _load_config(self):
+        """Загружает настройки из JSON-файла и применяет их."""
+        try:
+            if not CONFIG_PATH.exists():
+                return
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                data: dict = json.load(f)
+        except Exception:
+            return
+
+        if data.get("model_size"):
+            self.model_var.set(data["model_size"])
+        if data.get("use_gpu") is not None:
+            self.gpu_var.set(data["use_gpu"])
+        if data.get("overwrite") is not None:
+            self.overwrite_var.set(data["overwrite"])
+        if data.get("azure_key"):
+            self.azure_key_var.set(data["azure_key"])
+        if data.get("azure_region"):
+            self.azure_region_var.set(data["azure_region"])
+        if data.get("view_mode"):
+            self.view_mode_var.set(data["view_mode"])
+        if data.get("language"):
+            self.lang_var.set(data["language"])
+        if data.get("window_geometry"):
+            self.geometry(data["window_geometry"])
+
+        # После загрузки применяем layout под режим просмотра
+        self._on_view_mode_changed(self.view_mode_var.get())
+        # Если выбрана azure — показываем Azure-поля
+        if self.model_var.get() == "azure":
+            self.azure_frame.pack(fill="x", padx=8, pady=(0,2))
+
+    def _on_close(self):
+        """Сохраняет настройки и закрывает приложение."""
+        self._save_config()
+        self.destroy()
+
+    # ─── Автосохранение при изменении настроек ──────────────────
+    def _auto_save(self, *_):
+        self._save_config()
 
     def stop_processing(self):
         if self.engine and self.is_running:
