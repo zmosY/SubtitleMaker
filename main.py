@@ -137,9 +137,10 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(settings_row, text="Модель:", font=ctk.CTkFont(size=12)).pack(side="left", padx=(0,4))
         self.model_var = ctk.StringVar(value="small")
-        ctk.CTkOptionMenu(settings_row, variable=self.model_var,
-                          values=["tiny", "base", "small", "medium", "large-v3"],
-                          width=90, height=26).pack(side="left", padx=(0,15))
+        self.model_menu = ctk.CTkOptionMenu(settings_row, variable=self.model_var,
+                          values=["tiny", "base", "small", "medium", "large-v3", "azure"],
+                          width=100, height=26, command=self._on_model_changed)
+        self.model_menu.pack(side="left", padx=(0,15))
         self.overwrite_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(settings_row, text="Перезапись", variable=self.overwrite_var,
                         height=26, font=ctk.CTkFont(size=12)).pack(side="left", padx=(0,10))
@@ -147,6 +148,16 @@ class App(ctk.CTk):
         ctk.CTkCheckBox(settings_row, text="GPU", variable=self.gpu_var,
                         height=26, font=ctk.CTkFont(size=12)).pack(side="left")
 
+        # Azure-настройки (показываются только при выборе "azure")
+        self.azure_frame = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
+        ctk.CTkLabel(self.azure_frame, text="Azure Key:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0,4))
+        self.azure_key_var = ctk.StringVar()
+        ctk.CTkEntry(self.azure_frame, textvariable=self.azure_key_var, width=180,
+                     height=26, font=ctk.CTkFont(size=11), show="*").pack(side="left", padx=(0,10))
+        ctk.CTkLabel(self.azure_frame, text="Region:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0,4))
+        self.azure_region_var = ctk.StringVar(value="eastus")
+        ctk.CTkEntry(self.azure_frame, textvariable=self.azure_region_var, width=100,
+                     height=26, font=ctk.CTkFont(size=11)).pack(side="left")
         # Лог (консоль)
         self.log_box = ctk.CTkTextbox(self.advanced_frame, height=90,
                                       state="disabled", font=ctk.CTkFont(family="Consolas", size=9))
@@ -438,6 +449,14 @@ class App(ctk.CTk):
             self.log_message(f"Найдено: {count}")
         self._reflow_tiles()
 
+    def _on_model_changed(self, choice: str):
+        """Показывает/скрывает Azure-поля при выборе модели."""
+        if choice == "azure":
+            self.azure_frame.pack(fill="x", padx=8, pady=(0,2))
+            self.gpu_var.set(False)  # Azure не требует GPU
+        else:
+            self.azure_frame.pack_forget()
+
     def _toggle_advanced(self):
         """Разворачивает/сворачивает панель доп.настроек."""
         self.advanced_visible = not self.advanced_visible
@@ -480,7 +499,13 @@ class App(ctk.CTk):
         self.btn_stop.configure(state="normal")
         self.btn_select_files.configure(state="disabled")
         self.btn_select_folder.configure(state="disabled")
-        self.engine = SubtitleEngine(model_size=self.model_var.get(), use_gpu=self.gpu_var.get(), log_callback=self.log_message)
+        self.engine = SubtitleEngine(
+            model_size=self.model_var.get(),
+            use_gpu=self.gpu_var.get(),
+            log_callback=self.log_message,
+            azure_key=self.azure_key_var.get().strip(),
+            azure_region=self.azure_region_var.get().strip()
+        )
         threading.Thread(target=self._process_thread, daemon=True).start()
 
     def _process_thread(self):
