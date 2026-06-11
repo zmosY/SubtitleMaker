@@ -10,7 +10,7 @@
 Перейдите в [релизы](https://github.com/zmosY/SubtitleMaker/releases/latest) и скачайте Subtitlemaker.exe 
 
 ##Инструкция использования
-[инструкция](https://github.com/zmosY/SubtitleMaker/blob/main/sibtitlemakerprewiew_3wE7TwAR.mp4)
+https://github.com/zmosY/SubtitleMaker/blob/main/sibtitlemakerprewiew_3wE7TwAR.mp4
 
 
 ## Стек
