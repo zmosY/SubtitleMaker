@@ -1,7 +1,13 @@
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog
-from tkinterdnd2 import TkinterDnD, DND_FILES
+# Drag & drop — опционально, без него приложение работает
+_DND_AVAILABLE = False
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    _DND_AVAILABLE = True
+except ImportError:
+    pass
 import threading
 from pathlib import Path
 import pyperclip
@@ -19,7 +25,12 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-class App(TkinterDnD.Tk):
+if _DND_AVAILABLE:
+    _AppBase = TkinterDnD.Tk
+else:
+    _AppBase = ctk.CTk
+
+class App(_AppBase):
     def __init__(self):
         super().__init__()
 
@@ -84,21 +95,22 @@ class App(TkinterDnD.Tk):
         self.videos_scroll.grid_columnconfigure(0, weight=1)
         self.videos_scroll.bind("<Configure>", self._on_scroll_configure)
 
-        # Drag & drop hint (видна когда нет видео)
-        self.drop_hint = ctk.CTkLabel(
-            self.left_panel,            text="📥 Перетащите видеофайлы или папки сюда",
-            font=ctk.CTkFont(size=13), text_color="#666666", anchor="center"
-        )
-        self.drop_hint.place(relx=0.5, rely=0.55, anchor="center")
+        if _DND_AVAILABLE:
+            # Drag & drop hint (видна когда нет видео)
+            self.drop_hint = ctk.CTkLabel(
+                self.left_panel, text="📥 Перетащите видеофайлы или папки сюда",
+                font=ctk.CTkFont(size=13), text_color="#666666", anchor="center"
+            )
+            self.drop_hint.place(relx=0.5, rely=0.55, anchor="center")
 
-        # Регистрируем зоны для Drag & Drop
-        self.drop_target_register(DND_FILES)
-        self.dnd_bind('<<Drop>>', self._on_drop)
-        self.videos_scroll.drop_target_register(DND_FILES)
-        self.videos_scroll.dnd_bind('<<Drop>>', self._on_drop)
-        # DragEnter/DragLeave для визуальной подсветки (окно целиком)
-        self.dnd_bind('<<DragEnter>>', self._on_drag_enter)
-        self.dnd_bind('<<DragLeave>>', self._on_drag_leave)
+            # Регистрируем зоны для Drag & Drop
+            self.drop_target_register(DND_FILES)
+            self.dnd_bind('<<Drop>>', self._on_drop)
+            self.videos_scroll.drop_target_register(DND_FILES)
+            self.videos_scroll.dnd_bind('<<Drop>>', self._on_drop)
+            # DragEnter/DragLeave для визуальной подсветки (окно целиком)
+            self.dnd_bind('<<DragEnter>>', self._on_drag_enter)
+            self.dnd_bind('<<DragLeave>>', self._on_drag_leave)
 
         self.right_panel = ctk.CTkFrame(self.pane)
         self.pane.add(self.left_panel, minsize=200, width=400, stretch="always")
@@ -272,6 +284,8 @@ class App(TkinterDnD.Tk):
 
     def _update_drop_hint(self):
         """Показывает/скрывает подсказку о DnD в зависимости от наличия видео."""
+        if not _DND_AVAILABLE:
+            return
         if self.files_to_process:
             self.drop_hint.place_forget()
         else:
@@ -280,7 +294,8 @@ class App(TkinterDnD.Tk):
     def _add_video_item(self, video_path: str):
         path = Path(video_path)
         has_srt = get_srt_path(video_path, "ru").exists() or get_srt_path(video_path, "en").exists()
-        self.drop_hint.place_forget()
+        if _DND_AVAILABLE:
+            self.drop_hint.place_forget()
         if self.view_mode_var.get() == "👁️ Превью":
             self._add_video_card(video_path, path, has_srt)
         else:
