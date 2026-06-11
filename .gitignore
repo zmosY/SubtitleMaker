@@ -34,3 +34,16 @@ thumbnails/
 
 # Logs
 *.log
+
+# User config with API keys
+config.json
+
+# Windows reserved names (can appear accidentally)
+nul
+NUL
+
+# Test data
+test_data/
+
+# Generated subtitles
+subtitles/

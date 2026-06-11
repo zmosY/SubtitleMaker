@@ -15,6 +15,7 @@ import hashlib
 import subprocess
 import os
 import time
+import math
 import json
 from PIL import Image
 from subtitle_engine import SubtitleEngine, get_srt_path, check_deepgram_balance
@@ -25,16 +26,22 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-if _DND_AVAILABLE:
-    _AppBase = TkinterDnD.Tk
-else:
-    _AppBase = ctk.CTk
+class App(ctk.CTk):   # всегда ctk.CTk, чтобы сохранить тёмную тему
+    # --- Цвета прогресс-бара ---
+    _PB_BG = "#2a2a2a"       # трек (незаполненная часть)
+    _PB_FILL = "#4a90d9"     # заполненная часть
+    _PB_PULSE = "#7ab8ff"    # цвет при пульсации (ярче)
 
-class App(_AppBase):
     def __init__(self):
         super().__init__()
 
-        # Windows DPI awareness (было в ctk.CTk, теряем при смене на TkinterDnD.Tk)
+        # Ручная инициализация DnD на ctk.CTk (не меняем базовый класс)
+        if _DND_AVAILABLE:
+            TkinterDnD.require(self)   # загружает tkdnd для нашей платформы
+            # Используем прямые Tcl-команды (методы DnDWrapper не доступны на Tk)
+            self.tk.call('tkdnd::drop_target', 'register', self._w, DND_FILES)
+        
+        # Windows DPI awareness
         try:
             from ctypes import windll
             windll.shcore.SetProcessDpiAwareness(2)
@@ -53,8 +60,8 @@ class App(_AppBase):
         self._progress_current = 0.0
         self._progress_target = 0.0
         self._progress_anim_id = None
-        self._highlight_offset = 0.0
-        self._highlight_anim_id = None
+        self._pulse_value = 0.0
+        self._pulse_anim_id = None
         self.thumbnails_dir = Path(__file__).parent / "thumbnails"
         self.thumbnails_dir.mkdir(exist_ok=True)
 
@@ -79,16 +86,23 @@ class App(_AppBase):
         
         ctk.CTkLabel(header_frame, text="📁 Видеофайлы", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, sticky="w")
         
-        self.view_mode_var = ctk.StringVar(value="👁️ Превью")
+        self.view_mode_var = ctk.StringVar(value="👁️Превью")
         self.view_toggle = ctk.CTkSegmentedButton(
             header_frame,
-            values=["👁️ Превью", "📋 Список"],
+            values=["👁️Превью", "📋Список"],
             variable=self.view_mode_var,
             command=self._on_view_mode_changed,
             height=26,
             width=180
         )
         self.view_toggle.grid(row=0, column=1, padx=(10,0))
+        
+        self.btn_clear = ctk.CTkButton(
+            header_frame, text="🗑 Очистить", command=self._clear_list,
+            width=90, height=26, fg_color="#555555", hover_color="#777777",
+            font=ctk.CTkFont(size=12), cursor="hand2", state="disabled"
+        )
+        self.btn_clear.grid(row=0, column=2, padx=(8,0))
         
         btn_frame = ctk.CTkFrame(self.left_panel, fg_color="transparent")
         btn_frame.grid(row=1, column=0, padx=10, pady=(0,5), sticky="ew")
@@ -131,14 +145,10 @@ class App(_AppBase):
             )
             self.drop_hint.place(relx=0.5, rely=0.55, anchor="center")
 
-            # Регистрируем зоны для Drag & Drop
-            self.drop_target_register(DND_FILES)
-            self.dnd_bind('<<Drop>>', self._on_drop)
-            self.videos_canvas.drop_target_register(DND_FILES)
-            self.videos_canvas.dnd_bind('<<Drop>>', self._on_drop)
-            # DragEnter/DragLeave для визуальной подсветки (окно целиком)
-            self.dnd_bind('<<DragEnter>>', self._on_drag_enter)
-            self.dnd_bind('<<DragLeave>>', self._on_drag_leave)
+            # Привязываем DnD-события через стандартный bind (virtual events работают после require)
+            self.bind('<<Drop>>', self._on_drop, add='+')
+            self.bind('<<DragEnter>>', self._on_drag_enter, add='+')
+            self.bind('<<DragLeave>>', self._on_drag_leave, add='+')
 
         self.right_panel = ctk.CTkFrame(self.pane)
         self.pane.add(self.left_panel, minsize=200, width=400, stretch="always")
@@ -146,7 +156,7 @@ class App(_AppBase):
         self.right_panel.grid_rowconfigure(2, weight=1)
         self.right_panel.grid_columnconfigure(0, weight=1)
 
-        self.preview_title = ctk.CTkLabel(self.right_panel, text="📝 Субтитры", font=ctk.CTkFont(size=14, weight="bold"))
+        self.preview_title = ctk.CTkLabel(self.right_panel, text="Субтитры", font=ctk.CTkFont(size=14, weight="bold"))
         self.preview_title.grid(row=0, column=0, padx=10, pady=(10,5), sticky="w")
 
         lang_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
@@ -168,17 +178,12 @@ class App(_AppBase):
         self.bar_row = ctk.CTkFrame(self.bottom_frame, fg_color="transparent")
         self.bar_row.pack(fill="x", padx=6, pady=(6,2))
 
-        # Прогресс-бар + оверлей для бегущего блика (как в загрузках Windows)
-        self.progress_bar = ctk.CTkProgressBar(self.bar_row, height=22, corner_radius=7,
-                                                progress_color="#4a90d9",
-                                                fg_color="#2a2a2a")
-        self.progress_bar.set(0)
+        # Прогресс-бар на Canvas: трек + заполнение + пульсация
+        self.progress_bar = tk.Canvas(self.bar_row, height=24, highlightthickness=0,
+                                      bg=self._PB_BG, bd=0)
         self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0,10))
-
-        self._highlight_canvas = tk.Canvas(self.progress_bar, highlightthickness=0,
-                                           bg="#2a2a2a", bd=0)
-        self._highlight_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self._highlight_canvas.bind("<Configure>", self._redraw_highlight)
+        self.progress_bar.bind("<Configure>", self._draw_progress_bar)
+        self._progress_value = 0.0
 
         # Проценты + время
         self.progress_label = ctk.CTkLabel(self.bar_row, text="0%  --:--",
@@ -316,7 +321,9 @@ class App(_AppBase):
     _VIDEO_EXTS = ('.mp4', '.avi', '.mkv', '.mov')
 
     def _update_drop_hint(self):
-        """Показывает/скрывает подсказку о DnD в зависимости от наличия видео."""
+        """Показывает/скрывает подсказку о DnD + управляет кнопкой очистки."""
+        # Кнопка очистки — обновляется всегда, независимо от DnD
+        self.btn_clear.configure(state="normal" if self.files_to_process else "disabled")
         if not _DND_AVAILABLE:
             return
         if self.files_to_process:
@@ -343,9 +350,8 @@ class App(_AppBase):
     def _add_video_item(self, video_path: str):
         path = Path(video_path)
         has_srt = get_srt_path(video_path, "ru").exists() or get_srt_path(video_path, "en").exists()
-        if _DND_AVAILABLE:
-            self.drop_hint.place_forget()
-        if self.view_mode_var.get() == "👁️ Превью":
+        self._update_drop_hint()
+        if self.view_mode_var.get() == "👁️Превью":
             self._add_video_card(video_path, path, has_srt)
         else:
             self._add_video_row(video_path, path, has_srt)
@@ -358,7 +364,7 @@ class App(_AppBase):
         item.pack(fill="x", pady=2, padx=5)
         def on_click():
             self.selected_video_path = video_path
-            self.preview_title.configure(text=f"📝 {path.name}")
+            self.preview_title.configure(text=path.name)
             self._load_subtitle(video_path)
         btn = ctk.CTkButton(item, text=f"🎬 {path.name}", command=on_click, anchor="w", fg_color="transparent", border_width=1, border_color="#444", hover_color="#3a3a3a", height=30)
         btn.grid(row=0, column=0, sticky="ew", padx=(0,5))
@@ -386,7 +392,7 @@ class App(_AppBase):
 
         def on_click():
             self.selected_video_path = video_path
-            self.preview_title.configure(text=f"📝 {path.name}")
+            self.preview_title.configure(text=path.name)
             self._load_subtitle(video_path)
 
         # --- Контейнер для превью (чтобы можно было наложить бейдж) ---
@@ -448,7 +454,7 @@ class App(_AppBase):
 
     def _reflow_tiles(self):
         """Перекомпоновывает плитки в grid-сетку с динамическим числом колонок."""
-        if self.view_mode_var.get() != "👁️ Превью":
+        if self.view_mode_var.get() != "👁️Превью":
             return
         tiles = [t for t in self.video_widgets.values() if t.winfo_exists()]
         if not tiles:
@@ -479,7 +485,7 @@ class App(_AppBase):
         self.videos_canvas.itemconfig(self._canvas_window, width=canvas_w)
         self.videos_canvas.configure(scrollregion=self.videos_canvas.bbox("all"))
         self._update_scrollbar()
-        if self.view_mode_var.get() == "👁️ Превью":
+        if self.view_mode_var.get() == "👁️Превью":
             self._reflow_tiles()
 
     def _load_thumbnail(self, video_path: str):
@@ -537,6 +543,21 @@ class App(_AppBase):
             placeholder = Image.new('RGB', (self._TILE_W, self._TILE_H), color='#3a3a3a')
             return ctk.CTkImage(light_image=placeholder, dark_image=placeholder, size=(self._TILE_W, self._TILE_H))
 
+    def _clear_list(self):
+        """Удаляет все видео из списка (не трогает субтитры)."""
+        if self.is_running:
+            self.log_message("Нельзя очистить список во время обработки.")
+            return
+        self.files_to_process.clear()
+        for w in self.videos_inner.winfo_children():
+            w.destroy()
+        self.video_widgets.clear()
+        self.selected_video_path = None
+        self._clear_preview()
+        self._update_drop_hint()
+        self._update_scrollbar()
+        self.log_message("Список видео очищен.")
+
     def _load_subtitle(self, video_path: str):
         lang = self.lang_var.get()
         srt_file = get_srt_path(video_path, lang)
@@ -562,7 +583,7 @@ class App(_AppBase):
     )
 
     def _clear_preview(self):
-        self.preview_title.configure(text="📝 Субтитры")
+        self.preview_title.configure(text="Субтитры")
         self.preview_box.configure(state="normal")
         self.preview_box.delete("1.0", "end")
         self.preview_box.insert("1.0", self._EMPTY_PREVIEW_TEXT)
@@ -597,7 +618,7 @@ class App(_AppBase):
             pass  # уже добавлена
         if self.selected_video_path:
             self._load_subtitle(self.selected_video_path)
-        if mode_value == "👁️ Превью":
+        if mode_value == "👁️Превью":
             self._reflow_tiles()
         self.update_idletasks()
 
@@ -673,8 +694,42 @@ class App(_AppBase):
             else:
                 widget.configure(border_color="#3a3a3a", border_width=1)
 
+    # ─── Прогресс-бар на Canvas (трек + заполнение + бегущий блик) ──
+
+    @staticmethod
+    def _hex_to_rgb(hex_color: str):
+        """Переводит #rrggbb в (r, g, b)."""
+        h = hex_color.lstrip('#')
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+    def _draw_progress_bar(self, event=None):
+        """Рисует трек, заполнение и пульсацию на одном canvas."""
+        c = self.progress_bar
+        c.delete("all")
+        w = c.winfo_width()
+        h = c.winfo_height()
+        if w < 4 or h < 4:
+            return
+
+        # Трек (тёмный фон) — простой прямоугольник
+        c.create_rectangle(0, 0, w, h, fill=self._PB_BG, outline="", tags="track")
+
+        # Заполненная часть с пульсацией
+        fill_w = int(w * self._progress_value)
+        if fill_w > 0:
+            p = self._pulse_value if (self.is_running and fill_w > 20) else 0.0
+            r1, g1, b1 = self._hex_to_rgb(self._PB_FILL)
+            r2, g2, b2 = self._hex_to_rgb(self._PB_PULSE)
+            rr = int(r1 + (r2 - r1) * p)
+            gg = int(g1 + (g2 - g1) * p)
+            bb = int(b1 + (b2 - b1) * p)
+            pulse_color = f"#{rr:02x}{gg:02x}{bb:02x}"
+            c.create_rectangle(0, 0, fill_w, h, fill=pulse_color, outline="", tags="fill")
+
+        # Обводка
+        c.create_rectangle(0, 0, w, h, outline="#3a3a3a", tags="border")
+
     def update_progress(self, fraction: float):
-        """Обновляет прогресс-бар с плавной анимацией (fraction 0.0–1.0)."""
         fraction = min(1.0, max(0.0, fraction))
         self._progress_target = fraction
         if self._progress_anim_id is None:
@@ -706,67 +761,38 @@ class App(_AppBase):
         if abs(target - new) < 0.002:
             new = target
         self._progress_current = new
-        self.progress_bar.set(new)
+        self._progress_value = new
+        self._draw_progress_bar()
         if abs(new - target) > 0.001:
             self._progress_anim_id = self.after(16, self._animate_progress_step)
         else:
             self._progress_anim_id = None
 
-    # ─── Бегущий блик прогресс-бара (Windows-style) ─────────────
+    # ─── Пульсация прогресс-бара ───────────────────────────────
 
-    def _start_highlight_animation(self):
-        """Запускает бегущий блик по прогресс-бару."""
-        self._highlight_offset = 0.0
-        self._highlight_canvas.lift()
-        if self._highlight_anim_id is None:
-            self._animate_highlight_step()
+    def _start_pulse_animation(self):
+        """Запускает пульсацию прогресс-бара (плавно с нуля)."""
+        self._pulse_value = 0.0
+        self._pulse_start = time.time()
+        if self._pulse_anim_id is None:
+            self._animate_pulse_step()
 
-    def _stop_highlight_animation(self):
-        """Останавливает бегущий блик и очищает canvas."""
-        if self._highlight_anim_id is not None:
-            self.after_cancel(self._highlight_anim_id)
-            self._highlight_anim_id = None
-        self._highlight_offset = 0.0
-        self._highlight_canvas.delete("all")
+    def _stop_pulse_animation(self):
+        """Останавливает пульсацию и перерисовывает бар."""
+        if self._pulse_anim_id is not None:
+            self.after_cancel(self._pulse_anim_id)
+            self._pulse_anim_id = None
+        self._pulse_value = 0.0
+        self._draw_progress_bar()
 
-    def _animate_highlight_step(self):
-        """Один кадр анимации блика — движется слева направо."""
+    def _animate_pulse_step(self):
+        """Один кадр анимации пульсации — плавное дыхание."""
         if not self.is_running:
             return
-        self._highlight_offset = (self._highlight_offset + 0.015) % 1.5
-        self._redraw_highlight()
-        self._highlight_anim_id = self.after(25, self._animate_highlight_step)
-
-    def _redraw_highlight(self, event=None):
-        """Рисует градиентный блик на canvas-оверлее."""
-        self._highlight_canvas.delete("all")
-        w = self._highlight_canvas.winfo_width()
-        h = self._highlight_canvas.winfo_height()
-        if w < 4 or h < 4:
-            return
-        offset = self._highlight_offset
-        # Ширина блика ~20% от ширины бара
-        stripe_w = max(30, int(w * 0.18))
-        # Позиция блика бежит от левого края до правого + запас
-        x_center = int(offset * w) - stripe_w // 2
-        # Рисуем градиент из 5 полосок разной прозрачности
-        segments = [
-            (0.00, "#2a2a2a"),   # прозрачный край
-            (0.15, "#3a6099"),   # слабое свечение
-            (0.35, "#5a90d9"),   # яркий центр
-            (0.65, "#4a80c9"),   # затухание
-            (0.85, "#3a6099"),   # слабое свечение
-            (1.00, "#2a2a2a"),   # прозрачный край
-        ]
-        for i in range(len(segments) - 1):
-            x1 = x_center + int(stripe_w * segments[i][0])
-            x2 = x_center + int(stripe_w * segments[i + 1][0])
-            x1 = max(0, x1)
-            x2 = min(w, x2)
-            if x2 > x1:
-                self._highlight_canvas.create_rectangle(
-                    x1, 0, x2, h, fill=segments[i + 1][1], outline=""
-                )
+        elapsed = time.time() - self._pulse_start
+        self._pulse_value = (math.sin(elapsed * 3.0) + 1.0) / 2.0
+        self._draw_progress_bar()
+        self._pulse_anim_id = self.after(33, self._animate_pulse_step)
 
     def _get_deepgram_keys(self) -> list:
         """Возвращает список ключей из строк Entry (без пустых)."""
@@ -820,13 +846,14 @@ class App(_AppBase):
         if not self.files_to_process or self.is_running:
             return
         self.is_running = True
-        self.progress_bar.set(0)
         if self._progress_anim_id is not None:
             self.after_cancel(self._progress_anim_id)
             self._progress_anim_id = None
         self._progress_current = 0.0
         self._progress_target = 0.0
-        self._start_highlight_animation()
+        self._progress_value = 0.0
+        self._draw_progress_bar()
+        self._start_pulse_animation()
         self.progress_label.configure(text="0%  --:--")
         self._start_time = time.time()
         self.btn_run.configure(text="⏹ Стоп", fg_color="#dc2626", hover_color="#b91c1c")
@@ -852,7 +879,7 @@ class App(_AppBase):
 
     def _on_finished(self):
         self.is_running = False
-        self._stop_highlight_animation()
+        self._stop_pulse_animation()
         self._progress_target = 1.0
         if self._progress_anim_id is None:
             self._animate_progress_step()
@@ -938,6 +965,9 @@ class App(_AppBase):
 
     def _on_close(self):
         """Сохраняет настройки и закрывает приложение."""
+        self._stop_pulse_animation()
+        if self._progress_anim_id is not None:
+            self.after_cancel(self._progress_anim_id)
         self._save_config()
         self.destroy()
 
@@ -1013,7 +1043,7 @@ class App(_AppBase):
     def stop_processing(self):
         if self.engine and self.is_running:
             self.log_message("Остановка...")
-            self._stop_highlight_animation()
+            self._stop_pulse_animation()
             self.engine.stop()
 
 if __name__ == "__main__":

@@ -262,6 +262,8 @@ class SubtitleEngine:
         if ffmpeg_result.returncode != 0:
             stderr_tail = ffmpeg_result.stderr.decode(errors='replace')[-200:]
             self.log(f"FFmpeg error: {stderr_tail}")
+            if "does not contain any stream" in stderr_tail:
+                raise RuntimeError("No audio track found in video file")
             raise RuntimeError("Audio conversion failed")
         if not wav_path.exists() or wav_path.stat().st_size == 0:
             raise RuntimeError("Converted WAV is empty — video may have no audio track")
@@ -384,8 +386,8 @@ class SubtitleEngine:
                 # Собираем из слов группами по ~10 слов
                 alt = channel.alternatives[0] if channel.alternatives else None
                 if not alt or not alt.words:
-                    self.log("Deepgram returned no words.")
-                    raise RuntimeError("No transcription from Deepgram")
+                    self.log("Deepgram returned no words — no speech detected, skipping.")
+                    return [], lang, _report
                 words = alt.words
                 gs, gt = None, []
                 for w in words:
@@ -405,8 +407,8 @@ class SubtitleEngine:
                 self.log(f"After sentence split: {len(segments)} segments")
 
             if not segments:
-                self.log("Deepgram returned no results.")
-                raise RuntimeError("No transcription from Deepgram")
+                self.log("Deepgram returned no results — no speech detected, skipping.")
+                return [], lang, _report
         except (AttributeError, IndexError, TypeError) as e:
             raise RuntimeError(f"Failed to extract segments from Deepgram response: {e}")
 
@@ -441,6 +443,20 @@ class SubtitleEngine:
                 else:
                     segments, lang, _report = self._transcribe_whisper(
                         video_path, progress_callback, idx, total)
+
+                if not segments:
+                    self.log(f"{video_path.name}: нет речи, создаём пустые SRT.")
+                    # Всё равно создаём пустые SRT-файлы, чтобы UI не показывал «не найден»
+                    for srt in (srt_ru, srt_en):
+                        with open(srt, "w", encoding="utf-8") as f:
+                            f.write("")
+                    mapping = _load_mapping()
+                    mapping[video_path.name] = _path_hash(str(video_path))
+                    _save_mapping(mapping)
+                    if progress_callback:
+                        progress_callback(idx / total)
+                    continue
+
                 ru_lines, en_lines = [], []
 
                 for i, seg in enumerate(segments, start=1):
@@ -481,6 +497,15 @@ class SubtitleEngine:
                 break
             except Exception as e:
                 self.log(f"Error processing {Path(p).name}: {e}")
+                # Создаём пустые SRT, чтобы UI не показывал «не найден»
+                for srt in (srt_ru, srt_en):
+                    with open(srt, "w", encoding="utf-8") as f:
+                        f.write("")
+                mapping = _load_mapping()
+                mapping[video_path.name] = _path_hash(str(video_path))
+                _save_mapping(mapping)
+                if progress_callback:
+                    progress_callback(idx / total)
 
         self.log("Done!")
 
