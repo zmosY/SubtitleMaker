@@ -164,7 +164,7 @@ class App(_AppBase):
         self.bar_row.pack(fill="x", padx=6, pady=(6,2))
 
         # Прогресс-бар
-        self.progress_bar = ctk.CTkProgressBar(self.bar_row, height=10, corner_radius=5,
+        self.progress_bar = ctk.CTkProgressBar(self.bar_row, height=22, corner_radius=7,
                                                 progress_color="#4a90d9",
                                                 fg_color="#2a2a2a")
         self.progress_bar.set(0)
@@ -182,8 +182,8 @@ class App(_AppBase):
         self.advanced_visible = False
         # Кнопка Старт/Стоп (одна — переключается)
         self.btn_run = ctk.CTkButton(self.bar_row, text="▶ Старт", command=self._toggle_run,
-                                      fg_color="#16a34a", hover_color="#15803d",
-                                      width=78, height=28)
+                                      fg_color="#28a745", hover_color="#218838",
+                                      width=120, height=38, font=ctk.CTkFont(size=14, weight="bold"))
         self.btn_run.pack(side="left", padx=(0,12))
 
         self.btn_advanced = ctk.CTkButton(
