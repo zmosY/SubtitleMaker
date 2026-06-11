@@ -1,6 +1,7 @@
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog
+from tkinterdnd2 import TkinterDnD, DND_FILES
 import threading
 from pathlib import Path
 import pyperclip
@@ -18,9 +19,17 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-class App(ctk.CTk):
+class App(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
+
+        # Windows DPI awareness (было в ctk.CTk, теряем при смене на TkinterDnD.Tk)
+        try:
+            from ctypes import windll
+            windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            pass
+
         self.title("SubtitleMaker by AI")
         self.geometry("900x650")
         self.minsize(800, 600)
@@ -75,6 +84,22 @@ class App(ctk.CTk):
         self.videos_scroll.grid_columnconfigure(0, weight=1)
         self.videos_scroll.bind("<Configure>", self._on_scroll_configure)
 
+        # Drag & drop hint (видна когда нет видео)
+        self.drop_hint = ctk.CTkLabel(
+            self.left_panel,            text="📥 Перетащите видеофайлы или папки сюда",
+            font=ctk.CTkFont(size=13), text_color="#666666", anchor="center"
+        )
+        self.drop_hint.place(relx=0.5, rely=0.55, anchor="center")
+
+        # Регистрируем зоны для Drag & Drop
+        self.drop_target_register(DND_FILES)
+        self.dnd_bind('<<Drop>>', self._on_drop)
+        self.videos_scroll.drop_target_register(DND_FILES)
+        self.videos_scroll.dnd_bind('<<Drop>>', self._on_drop)
+        # DragEnter/DragLeave для визуальной подсветки (окно целиком)
+        self.dnd_bind('<<DragEnter>>', self._on_drag_enter)
+        self.dnd_bind('<<DragLeave>>', self._on_drag_leave)
+
         self.right_panel = ctk.CTkFrame(self.pane)
         self.pane.add(self.left_panel, minsize=200, width=400, stretch="always")
         self.pane.add(self.right_panel, minsize=200, width=400, stretch="always")
@@ -104,7 +129,7 @@ class App(ctk.CTk):
         self.bar_row.pack(fill="x", padx=6, pady=(6,2))
 
         # Прогресс-бар
-        self.progress_bar = ctk.CTkProgressBar(self.bar_row, height=14, corner_radius=7,
+        self.progress_bar = ctk.CTkProgressBar(self.bar_row, height=10, corner_radius=5,
                                                 progress_color="#4a90d9",
                                                 fg_color="#2a2a2a")
         self.progress_bar.set(0)
@@ -116,18 +141,16 @@ class App(ctk.CTk):
                                            anchor="center")
         self.progress_label.pack(side="left", padx=(0,12))
 
-        # Кнопки Старт / Стоп
-        ctrl_frame = ctk.CTkFrame(self.bar_row, fg_color="transparent")
-        ctrl_frame.pack(side="left")
-        self.btn_start = ctk.CTkButton(ctrl_frame, text="▶ Старт", command=self.start_processing,
-                                       fg_color="green", width=78, height=28)
-        self.btn_start.pack(side="left", padx=(0,4))
-        self.btn_stop = ctk.CTkButton(ctrl_frame, text="⏹ Стоп", command=self.stop_processing,
-                                      fg_color="red", state="disabled", width=78, height=28)
-        self.btn_stop.pack(side="left")
+
 
         # Кнопка «Дополнительно»
         self.advanced_visible = False
+        # Кнопка Старт/Стоп (одна — переключается)
+        self.btn_run = ctk.CTkButton(self.bar_row, text="▶ Старт", command=self._toggle_run,
+                                      fg_color="#16a34a", hover_color="#15803d",
+                                      width=78, height=28)
+        self.btn_run.pack(side="left", padx=(0,12))
+
         self.btn_advanced = ctk.CTkButton(
             self.bar_row, text="⚙ Дополнительно ▼", command=self._toggle_advanced,
             width=148, height=28, fg_color="transparent", border_width=1,
@@ -194,7 +217,47 @@ class App(ctk.CTk):
         # Автосохранение настроек при закрытии окна
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Заполняем предпросмотр заглушкой при старте
+        self._clear_preview()
+
         self.log_message("Готово! Выберите видео для работы.")
+
+    def _on_drop(self, event):
+        """Обработчик Drag & Drop: видеофайлы + папки с видео."""
+        self._on_drag_leave(None)
+        raw_paths = self.tk.splitlist(event.data)
+        count = 0
+        for raw in raw_paths:
+            p = Path(raw.strip().strip('{').strip('}'))
+            if p.is_dir():
+                # Папка — рекурсивно ищем все видео
+                try:
+                    for video_path in p.rglob('*'):
+                        if video_path.suffix.lower() in self._VIDEO_EXTS:
+                            vp = str(video_path)
+                            if vp not in self.files_to_process:
+                                self.files_to_process.append(vp)
+                                self._add_video_item(vp)
+                                count += 1
+                except PermissionError:
+                    pass  # нет доступа к подпапке — пропускаем
+            elif p.suffix.lower() in self._VIDEO_EXTS:
+                vp = str(p)
+                if vp not in self.files_to_process:
+                    self.files_to_process.append(vp)
+                    self._add_video_item(vp)
+                    count += 1
+        if count:
+            self.log_message(f"📥 Добавлено перетаскиванием: {count}")
+            self._reflow_tiles()
+
+    def _on_drag_enter(self, event):
+        """Подсветка при наведении с файлами."""
+        self.left_panel.configure(fg_color="#1a2a3d")
+
+    def _on_drag_leave(self, event):
+        """Сброс подсветки."""
+        self.left_panel.configure(fg_color=("#dbdbdb", "#2b2b2b"))
 
     def log_message(self, msg):
         self.after(0, lambda: self._append_log(msg))
@@ -205,9 +268,19 @@ class App(ctk.CTk):
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
 
+    _VIDEO_EXTS = ('.mp4', '.avi', '.mkv', '.mov')
+
+    def _update_drop_hint(self):
+        """Показывает/скрывает подсказку о DnD в зависимости от наличия видео."""
+        if self.files_to_process:
+            self.drop_hint.place_forget()
+        else:
+            self.drop_hint.place(relx=0.5, rely=0.55, anchor="center")
+
     def _add_video_item(self, video_path: str):
         path = Path(video_path)
         has_srt = get_srt_path(video_path, "ru").exists() or get_srt_path(video_path, "en").exists()
+        self.drop_hint.place_forget()
         if self.view_mode_var.get() == "👁️ Превью":
             self._add_video_card(video_path, path, has_srt)
         else:
@@ -232,6 +305,7 @@ class App(ctk.CTk):
             item.destroy()
             if self.selected_video_path == video_path:
                 self._clear_preview()
+            self._update_drop_hint()
         ctk.CTkButton(item, text="✕", command=remove, width=25, height=25, fg_color="#ef4444", hover_color="#dc2626").grid(row=0, column=2, padx=(5,0))
         self.video_widgets[video_path] = item
 
@@ -283,6 +357,7 @@ class App(ctk.CTk):
             if self.selected_video_path == video_path:
                 self._clear_preview()
             self._reflow_tiles()
+            self._update_drop_hint()
         rm_btn = ctk.CTkButton(
             thumb_holder, text="✕", command=remove,
             width=22, height=22, fg_color="#cc3333", hover_color="#ff4444",
@@ -405,11 +480,20 @@ class App(ctk.CTk):
             self.preview_box.insert("1.0", f"Файл не найден:\n{get_srt_path(video_path, lang).name}")
         self.preview_box.configure(state="disabled")
 
+    _EMPTY_PREVIEW_TEXT = (
+        "Здесь пока ничего нет \n\n"
+        "1. Добавьте видео (кнопка «📂 Выбрать видео…»)\n"
+        "2. Нажмите «▶ Старт»\n"
+        "3. Субтитры появятся здесь\n\n"
+        "Вы также можете кликнуть на видео слева,\n"
+        "чтобы посмотреть готовые субтитры."
+    )
+
     def _clear_preview(self):
         self.preview_title.configure(text="📝 Предпросмотр")
         self.preview_box.configure(state="normal")
         self.preview_box.delete("1.0", "end")
-        self.preview_box.insert("1.0", "Выберите видео для просмотра субтитров")
+        self.preview_box.insert("1.0", self._EMPTY_PREVIEW_TEXT)
         self.preview_box.configure(state="disabled")
 
     def _on_view_mode_changed(self, value):
@@ -420,6 +504,7 @@ class App(ctk.CTk):
         self.video_widgets.clear()
         for v in self.files_to_process:
             self._add_video_item(v)
+        self._update_drop_hint()
         # Применяем режим (правая панель всегда остаётся)
         self._apply_view_mode_layout(value)
         # Восстанавливаем подсветку обрабатываемого видео
@@ -474,8 +559,7 @@ class App(ctk.CTk):
             # Пользователь нажал Отмена — предложим выбрать папку
             folder = filedialog.askdirectory(title="Или выберите папку с видео")
             if folder:
-                exts = ('.mp4', '.avi', '.mkv', '.mov')
-                videos = [str(p) for p in Path(folder).iterdir() if p.suffix.lower() in exts]
+                videos = [str(p) for p in Path(folder).iterdir() if p.suffix.lower() in self._VIDEO_EXTS]
                 count = 0
                 for v in videos:
                     if v not in self.files_to_process:
@@ -577,6 +661,13 @@ class App(ctk.CTk):
         ctk.CTkButton(row, text="✕", command=remove, width=22, height=22,
                       fg_color="#ef4444", hover_color="#dc2626").pack(side="left")
 
+    def _toggle_run(self):
+        """Одна кнопка: запускает или останавливает обработку."""
+        if self.is_running:
+            self.stop_processing()
+        else:
+            self.start_processing()
+
     def start_processing(self):
         if not self.files_to_process or self.is_running:
             return
@@ -584,8 +675,7 @@ class App(ctk.CTk):
         self.progress_bar.set(0)
         self.progress_label.configure(text="0%  --:--")
         self._start_time = time.time()
-        self.btn_start.configure(state="disabled")
-        self.btn_stop.configure(state="normal")
+        self.btn_run.configure(text="⏹ Стоп", fg_color="#dc2626", hover_color="#b91c1c")
         self.btn_select_videos.configure(state="disabled")
         self.engine = SubtitleEngine(
             model_size=self.model_var.get(),
@@ -611,14 +701,14 @@ class App(ctk.CTk):
         self.progress_bar.set(1)
         self.progress_label.configure(text="100%  ✅ Готово")
         self.current_processing_path = None
-        self.btn_start.configure(state="normal")
-        self.btn_stop.configure(state="disabled")
+        self.btn_run.configure(text="▶ Старт", fg_color="#16a34a", hover_color="#15803d")
         self.btn_select_videos.configure(state="normal")
         for w in self.videos_scroll.winfo_children():
             w.destroy()
         self.video_widgets.clear()
         for v in self.files_to_process:
             self._add_video_item(v)
+        self._update_drop_hint()
         if self.selected_video_path:
             self._load_subtitle(self.selected_video_path)
         self._reflow_tiles()
