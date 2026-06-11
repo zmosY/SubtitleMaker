@@ -50,6 +50,11 @@ class App(_AppBase):
         self.selected_video_path = None
         self.video_widgets = {}
         self.current_processing_path = None
+        self._progress_current = 0.0
+        self._progress_target = 0.0
+        self._progress_anim_id = None
+        self._highlight_offset = 0.0
+        self._highlight_anim_id = None
         self.thumbnails_dir = Path(__file__).parent / "thumbnails"
         self.thumbnails_dir.mkdir(exist_ok=True)
 
@@ -163,12 +168,17 @@ class App(_AppBase):
         self.bar_row = ctk.CTkFrame(self.bottom_frame, fg_color="transparent")
         self.bar_row.pack(fill="x", padx=6, pady=(6,2))
 
-        # Прогресс-бар
+        # Прогресс-бар + оверлей для бегущего блика (как в загрузках Windows)
         self.progress_bar = ctk.CTkProgressBar(self.bar_row, height=22, corner_radius=7,
                                                 progress_color="#4a90d9",
                                                 fg_color="#2a2a2a")
         self.progress_bar.set(0)
         self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0,10))
+
+        self._highlight_canvas = tk.Canvas(self.progress_bar, highlightthickness=0,
+                                           bg="#2a2a2a", bd=0)
+        self._highlight_canvas.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._highlight_canvas.bind("<Configure>", self._redraw_highlight)
 
         # Проценты + время
         self.progress_label = ctk.CTkLabel(self.bar_row, text="0%  --:--",
@@ -664,14 +674,17 @@ class App(_AppBase):
                 widget.configure(border_color="#3a3a3a", border_width=1)
 
     def update_progress(self, fraction: float):
-        """Обновляет прогресс-бар (fraction 0.0–1.0) и метку с % + примерным временем."""
+        """Обновляет прогресс-бар с плавной анимацией (fraction 0.0–1.0)."""
         fraction = min(1.0, max(0.0, fraction))
-        self.progress_bar.set(fraction)
+        self._progress_target = fraction
+        if self._progress_anim_id is None:
+            self._animate_progress_step()
+        # Метку обновляем сразу (без анимации)
         pct = int(fraction * 100)
         if pct > 0 and self._start_time:
             elapsed = time.time() - self._start_time
             if elapsed > 2:
-                eta = elapsed / fraction * (1 - fraction)  # секунд до конца
+                eta = elapsed / fraction * (1 - fraction) if fraction > 0 else 0
                 if eta >= 120:
                     label = f"{pct}%  ~{int(eta // 60)} мин"
                 elif eta >= 60:
@@ -683,6 +696,77 @@ class App(_AppBase):
         else:
             label = f"{pct}%  --:--"
         self.progress_label.configure(text=label)
+
+    def _animate_progress_step(self):
+        """Один шаг анимации прогресс-бара — lerp к цели."""
+        current = self._progress_current
+        target = self._progress_target
+        # lerp с коэффициентом 0.3 — быстро в начале, плавно в конце
+        new = current + (target - current) * 0.3
+        if abs(target - new) < 0.002:
+            new = target
+        self._progress_current = new
+        self.progress_bar.set(new)
+        if abs(new - target) > 0.001:
+            self._progress_anim_id = self.after(16, self._animate_progress_step)
+        else:
+            self._progress_anim_id = None
+
+    # ─── Бегущий блик прогресс-бара (Windows-style) ─────────────
+
+    def _start_highlight_animation(self):
+        """Запускает бегущий блик по прогресс-бару."""
+        self._highlight_offset = 0.0
+        self._highlight_canvas.lift()
+        if self._highlight_anim_id is None:
+            self._animate_highlight_step()
+
+    def _stop_highlight_animation(self):
+        """Останавливает бегущий блик и очищает canvas."""
+        if self._highlight_anim_id is not None:
+            self.after_cancel(self._highlight_anim_id)
+            self._highlight_anim_id = None
+        self._highlight_offset = 0.0
+        self._highlight_canvas.delete("all")
+
+    def _animate_highlight_step(self):
+        """Один кадр анимации блика — движется слева направо."""
+        if not self.is_running:
+            return
+        self._highlight_offset = (self._highlight_offset + 0.015) % 1.5
+        self._redraw_highlight()
+        self._highlight_anim_id = self.after(25, self._animate_highlight_step)
+
+    def _redraw_highlight(self, event=None):
+        """Рисует градиентный блик на canvas-оверлее."""
+        self._highlight_canvas.delete("all")
+        w = self._highlight_canvas.winfo_width()
+        h = self._highlight_canvas.winfo_height()
+        if w < 4 or h < 4:
+            return
+        offset = self._highlight_offset
+        # Ширина блика ~20% от ширины бара
+        stripe_w = max(30, int(w * 0.18))
+        # Позиция блика бежит от левого края до правого + запас
+        x_center = int(offset * w) - stripe_w // 2
+        # Рисуем градиент из 5 полосок разной прозрачности
+        segments = [
+            (0.00, "#2a2a2a"),   # прозрачный край
+            (0.15, "#3a6099"),   # слабое свечение
+            (0.35, "#5a90d9"),   # яркий центр
+            (0.65, "#4a80c9"),   # затухание
+            (0.85, "#3a6099"),   # слабое свечение
+            (1.00, "#2a2a2a"),   # прозрачный край
+        ]
+        for i in range(len(segments) - 1):
+            x1 = x_center + int(stripe_w * segments[i][0])
+            x2 = x_center + int(stripe_w * segments[i + 1][0])
+            x1 = max(0, x1)
+            x2 = min(w, x2)
+            if x2 > x1:
+                self._highlight_canvas.create_rectangle(
+                    x1, 0, x2, h, fill=segments[i + 1][1], outline=""
+                )
 
     def _get_deepgram_keys(self) -> list:
         """Возвращает список ключей из строк Entry (без пустых)."""
@@ -737,6 +821,12 @@ class App(_AppBase):
             return
         self.is_running = True
         self.progress_bar.set(0)
+        if self._progress_anim_id is not None:
+            self.after_cancel(self._progress_anim_id)
+            self._progress_anim_id = None
+        self._progress_current = 0.0
+        self._progress_target = 0.0
+        self._start_highlight_animation()
         self.progress_label.configure(text="0%  --:--")
         self._start_time = time.time()
         self.btn_run.configure(text="⏹ Стоп", fg_color="#dc2626", hover_color="#b91c1c")
@@ -762,10 +852,13 @@ class App(_AppBase):
 
     def _on_finished(self):
         self.is_running = False
-        self.progress_bar.set(1)
+        self._stop_highlight_animation()
+        self._progress_target = 1.0
+        if self._progress_anim_id is None:
+            self._animate_progress_step()
         self.progress_label.configure(text="100%  ✅ Готово")
         self.current_processing_path = None
-        self.btn_run.configure(text="▶ Старт", fg_color="#16a34a", hover_color="#15803d")
+        self.btn_run.configure(text="▶ Старт", fg_color="#28a745", hover_color="#218838")
         self.btn_select_videos.configure(state="normal")
         for w in self.videos_inner.winfo_children():
             w.destroy()
@@ -920,6 +1013,7 @@ class App(_AppBase):
     def stop_processing(self):
         if self.engine and self.is_running:
             self.log_message("Остановка...")
+            self._stop_highlight_animation()
             self.engine.stop()
 
 if __name__ == "__main__":
