@@ -10,7 +10,9 @@
 Перейдите в [релизы](https://github.com/zmosY/SubtitleMaker/releases/latest) и скачайте Subtitlemaker.exe 
 
 ## Инструкция использования
-<video src="https://github.com/zmosY/SubtitleMaker/blob/main/sibtitlemakerprewiew_3wE7TwAR.mp4" width="100%" controls></video>
+<a href="https://www.youtube.com/watch?v=uDdMfEatrHU">
+  <img src="https://img.youtube.com/vi/uDdMfEatrHU/0.jpg" alt="Preview Video" width="100%">
+</a>
 
 
 ## Стек
