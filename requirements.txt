@@ -4,3 +4,4 @@ deep-translator>=1.11.4
 imageio-ffmpeg>=0.4.9
 pyperclip>=1.8.2
 Pillow>=11.0.0
+deepgram-sdk>=7.3.1

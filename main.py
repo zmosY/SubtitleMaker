@@ -1,4 +1,5 @@
 import customtkinter as ctk
+import tkinter as tk
 from tkinter import filedialog
 import threading
 from pathlib import Path
@@ -9,7 +10,7 @@ import os
 import time
 import json
 from PIL import Image
-from subtitle_engine import SubtitleEngine
+from subtitle_engine import SubtitleEngine, get_srt_path, check_deepgram_balance
 
 # Путь к файлу конфигурации
 CONFIG_PATH = Path(__file__).parent / "config.json"
@@ -28,6 +29,7 @@ class App(ctk.CTk):
         self.is_running = False
         self.selected_video_path = None
         self.video_widgets = {}
+        self.current_processing_path = None
         self.thumbnails_dir = Path(__file__).parent / "thumbnails"
         self.thumbnails_dir.mkdir(exist_ok=True)
 
@@ -35,8 +37,12 @@ class App(ctk.CTk):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        self.left_panel = ctk.CTkFrame(self)
-        self.left_panel.grid(row=0, column=0, sticky="nsew", padx=(10,5), pady=10)
+        # PanedWindow чтобы растягивать панели
+        self.pane = tk.PanedWindow(self, orient=tk.HORIZONTAL, sashwidth=5,
+                                   sashrelief=tk.RAISED, bg="#3a3a3a")
+        self.pane.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
+
+        self.left_panel = ctk.CTkFrame(self.pane)
         self.left_panel.grid_rowconfigure(2, weight=1)
         self.left_panel.grid_columnconfigure(0, weight=1)
 
@@ -69,8 +75,9 @@ class App(ctk.CTk):
         self.videos_scroll.grid_columnconfigure(0, weight=1)
         self.videos_scroll.bind("<Configure>", self._on_scroll_configure)
 
-        self.right_panel = ctk.CTkFrame(self)
-        self.right_panel.grid(row=0, column=1, sticky="nsew", padx=(5,10), pady=10)
+        self.right_panel = ctk.CTkFrame(self.pane)
+        self.pane.add(self.left_panel, minsize=200, width=400, stretch="always")
+        self.pane.add(self.right_panel, minsize=200, width=400, stretch="always")
         self.right_panel.grid_rowconfigure(2, weight=1)
         self.right_panel.grid_columnconfigure(0, weight=1)
 
@@ -147,14 +154,30 @@ class App(ctk.CTk):
                         height=26, font=ctk.CTkFont(size=12)).pack(side="left", padx=(0,10))
         self.gpu_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(settings_row, text="GPU", variable=self.gpu_var,
+                        height=26, font=ctk.CTkFont(size=12)).pack(side="left", padx=(0,10))
+        self.split_sentences_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(settings_row, text="Дробить длинные", variable=self.split_sentences_var,
                         height=26, font=ctk.CTkFont(size=12)).pack(side="left")
 
         # Deepgram-настройки (показываются только при выборе "deepgram")
         self.deepgram_frame = ctk.CTkFrame(self.advanced_frame, fg_color="transparent")
-        ctk.CTkLabel(self.deepgram_frame, text="🔑 Deepgram API Key:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0,4))
-        self.deepgram_key_var = ctk.StringVar()
-        ctk.CTkEntry(self.deepgram_frame, textvariable=self.deepgram_key_var, width=280,
-                     height=26, font=ctk.CTkFont(size=11), show="*").pack(side="left")
+        # Заголовок
+        ctk.CTkLabel(self.deepgram_frame, text="🔑 Deepgram API Keys:",
+                     font=ctk.CTkFont(size=11)).pack(fill="x", padx=(0,4), pady=(2,0))
+
+        # Фрейм со строками ключей (Entry + баланс + удалить)
+        self.keys_rows_frame = ctk.CTkFrame(self.deepgram_frame, fg_color="transparent")
+        self.keys_rows_frame.pack(fill="x", pady=(2,0))
+        self.key_entries = []       # список Entry-виджетов
+        self.key_balance_labels = []  # список баланс-лейблов для каждой строки
+        self._balance_check_id = 0  # счётчик для игнорирования устаревших результатов
+
+        # Кнопка добавления ключа
+        add_key_row = ctk.CTkFrame(self.deepgram_frame, fg_color="transparent")
+        add_key_row.pack(fill="x", pady=(2,4))
+        ctk.CTkButton(add_key_row, text="+ Добавить ключ", command=self._add_key_row,
+                      width=130, height=24, fg_color="#2563eb",
+                      hover_color="#1d4ed8", font=ctk.CTkFont(size=11)).pack(side="left")
         # Лог (консоль)
         self.log_box = ctk.CTkTextbox(self.advanced_frame, height=90,
                                       state="disabled", font=ctk.CTkFont(family="Consolas", size=9))
@@ -164,7 +187,7 @@ class App(ctk.CTk):
         self._load_config()
         # Автосохранение при изменении любой настройки
         for var in (self.model_var, self.overwrite_var, self.gpu_var,
-                    self.deepgram_key_var):
+                    self.split_sentences_var):
             var.trace_add("write", self._auto_save)
         self.lang_var.trace_add("write", self._auto_save)
         self.view_mode_var.trace_add("write", self._auto_save)
@@ -184,7 +207,7 @@ class App(ctk.CTk):
 
     def _add_video_item(self, video_path: str):
         path = Path(video_path)
-        has_srt = path.with_name(f"{path.stem}_ru.srt").exists() or path.with_name(f"{path.stem}_en.srt").exists()
+        has_srt = get_srt_path(video_path, "ru").exists() or get_srt_path(video_path, "en").exists()
         if self.view_mode_var.get() == "👁️ Превью":
             self._add_video_card(video_path, path, has_srt)
         else:
@@ -192,7 +215,7 @@ class App(ctk.CTk):
 
     def _add_video_row(self, video_path: str, path: Path, has_srt: bool):
         """Компактный элемент для режима списка."""
-        item = ctk.CTkFrame(self.videos_scroll, fg_color="transparent")
+        item = ctk.CTkFrame(self.videos_scroll, fg_color="transparent", border_width=1, border_color="#3a3a3a")
         item.grid_columnconfigure(0, weight=1)
         item.pack(fill="x", pady=2, padx=5)
         def on_click():
@@ -212,9 +235,9 @@ class App(ctk.CTk):
         ctk.CTkButton(item, text="✕", command=remove, width=25, height=25, fg_color="#ef4444", hover_color="#dc2626").grid(row=0, column=2, padx=(5,0))
         self.video_widgets[video_path] = item
 
-    _TILE_W = 160   # ширина превью в плитке
-    _TILE_H = 100   # высота превью в плитке
-    _TILE_GAP = 8   # зазор между плитками
+    _TILE_W = 130   # ширина превью в плитке (3 шт в ряд)
+    _TILE_H = 78    # высота превью в плитке
+    _TILE_GAP = 6   # зазор между плитками
 
     def _add_video_card(self, video_path: str, path: Path, has_srt: bool):
         """Плитка с превью для режима предпросмотра (grid-сетка)."""
@@ -345,7 +368,7 @@ class App(ctk.CTk):
                 seek_time = min(seek_time, 60.0)  # не дальше 60 сек
                 subprocess.run(
                     [ffmpeg_bin, '-ss', str(seek_time), '-i', video_path,
-                     '-vframes', '1', '-q:v', '3', '-vf', 'scale=284:160',
+                     '-vframes', '1', '-q:v', '3', '-vf', 'scale=260:156',
                      '-y', str(thumb_path)],
                     capture_output=True, timeout=30
                 )
@@ -353,7 +376,7 @@ class App(ctk.CTk):
                 if not thumb_path.exists():
                     subprocess.run(
                         [ffmpeg_bin, '-ss', '0', '-i', video_path,
-                         '-vframes', '1', '-q:v', '3', '-vf', 'scale=284:160',
+                         '-vframes', '1', '-q:v', '3', '-vf', 'scale=260:156',
                          '-y', str(thumb_path)],
                         capture_output=True, timeout=30
                     )
@@ -368,9 +391,8 @@ class App(ctk.CTk):
             return ctk.CTkImage(light_image=placeholder, dark_image=placeholder, size=(self._TILE_W, self._TILE_H))
 
     def _load_subtitle(self, video_path: str):
-        path = Path(video_path)
         lang = self.lang_var.get()
-        srt_file = path.with_name(f"{path.stem}_{lang}.srt")
+        srt_file = get_srt_path(video_path, lang)
         self.preview_box.configure(state="normal")
         self.preview_box.delete("1.0", "end")
         if srt_file.exists():
@@ -380,7 +402,7 @@ class App(ctk.CTk):
             except Exception as e:
                 self.preview_box.insert("1.0", f"Ошибка: {e}")
         else:
-            self.preview_box.insert("1.0", f"Файл не найден:\n{path.stem}_{lang}.srt")
+            self.preview_box.insert("1.0", f"Файл не найден:\n{get_srt_path(video_path, lang).name}")
         self.preview_box.configure(state="disabled")
 
     def _clear_preview(self):
@@ -391,34 +413,34 @@ class App(ctk.CTk):
         self.preview_box.configure(state="disabled")
 
     def _on_view_mode_changed(self, value):
-        """Переключает режим отображения списка видео."""
+        """Переключает режим отображения списка видео (превью всегда видно)."""
         # Очищаем и пересоздаём элементы списка
         for w in self.videos_scroll.winfo_children():
             w.destroy()
         self.video_widgets.clear()
         for v in self.files_to_process:
             self._add_video_item(v)
-        
-        # Применяем режим - value содержит выбранное значение из segmented button
+        # Применяем режим (правая панель всегда остаётся)
         self._apply_view_mode_layout(value)
-        # После добавления всех элементов перекомпоновываем плитки (для preview)
-        if value == "👁️ Превью":
-            self.update_idletasks()
-            self._reflow_tiles()
+        # Восстанавливаем подсветку обрабатываемого видео
+        if self.current_processing_path and self.is_running:
+            self._highlight_video(self.current_processing_path)
     
     def _apply_view_mode_layout(self, mode_value=None):
-        """Применяет текущий режим отображения к интерфейсу."""
+        """Применяет текущий режим отображения к интерфейсу.
+        Правая панель (предпросмотр) всегда видна."""
         if mode_value is None:
             mode_value = self.view_mode_var.get()
-        
-        if mode_value == "📋 Список":
-            # Режим списка: скрываем правую панель
-            self.right_panel.grid_remove()
-        else:
-            # Режим превью: показываем правую панель
-            self.right_panel.grid(row=0, column=1, sticky="nsew", padx=(5,10), pady=10)
-            if self.selected_video_path:
-                self._load_subtitle(self.selected_video_path)
+        # Убедимся, что правая панель на месте (могла быть скрыта в старой версии)
+        try:
+            self.pane.add(self.right_panel, after=self.left_panel,
+                          minsize=200, stretch="always")
+        except tk.TclError:
+            pass  # уже добавлена
+        if self.selected_video_path:
+            self._load_subtitle(self.selected_video_path)
+        if mode_value == "👁️ Превью":
+            self._reflow_tiles()
         self.update_idletasks()
 
     def _on_lang_changed(self, _):
@@ -482,6 +504,17 @@ class App(ctk.CTk):
             self.advanced_frame.pack_forget()
             self.btn_advanced.configure(text="⚙ Дополнительно ▼")
 
+    def _highlight_video(self, video_path: str):
+        """Подсвечивает обрабатываемое видео жёлтой рамкой."""
+        self.current_processing_path = video_path
+        for path, widget in self.video_widgets.items():
+            if not widget.winfo_exists():
+                continue
+            if path == video_path:
+                widget.configure(border_color="#fbbf24", border_width=2)
+            else:
+                widget.configure(border_color="#3a3a3a", border_width=1)
+
     def update_progress(self, fraction: float):
         """Обновляет прогресс-бар (fraction 0.0–1.0) и метку с % + примерным временем."""
         fraction = min(1.0, max(0.0, fraction))
@@ -503,6 +536,47 @@ class App(ctk.CTk):
             label = f"{pct}%  --:--"
         self.progress_label.configure(text=label)
 
+    def _get_deepgram_keys(self) -> list:
+        """Возвращает список ключей из строк Entry (без пустых)."""
+        keys = []
+        for entry in self.key_entries:
+            if entry.winfo_exists():
+                k = entry.get().strip()
+                if k:
+                    keys.append(k)
+        return keys
+
+    def _add_key_row(self, key_value: str = ""):
+        """Добавляет строку с полем ключа, балансом и кнопкой удаления."""
+        row = ctk.CTkFrame(self.keys_rows_frame, fg_color="transparent")
+        row.pack(fill="x", pady=1)
+
+        # Поле ввода ключа
+        entry = ctk.CTkEntry(row, font=ctk.CTkFont(family="Consolas", size=10),
+                             height=26)
+        entry.pack(side="left", fill="x", expand=True, padx=(0,4))
+        if key_value:
+            entry.insert(0, key_value)
+        entry.bind("<KeyRelease>", lambda e: self._on_keys_changed())
+        self.key_entries.append(entry)
+
+        # Лейбл баланса (справа от поля)
+        bal_lbl = ctk.CTkLabel(row, text="", width=170, anchor="w",
+                               font=ctk.CTkFont(size=9))
+        bal_lbl.pack(side="left", padx=(2,4))
+        self.key_balance_labels.append(bal_lbl)
+
+        # Кнопка удаления
+        def remove():
+            row.destroy()
+            if entry in self.key_entries:
+                idx = self.key_entries.index(entry)
+                self.key_entries.pop(idx)
+                self.key_balance_labels.pop(idx)
+            self._on_keys_changed()
+        ctk.CTkButton(row, text="✕", command=remove, width=22, height=22,
+                      fg_color="#ef4444", hover_color="#dc2626").pack(side="left")
+
     def start_processing(self):
         if not self.files_to_process or self.is_running:
             return
@@ -517,7 +591,9 @@ class App(ctk.CTk):
             model_size=self.model_var.get(),
             use_gpu=self.gpu_var.get(),
             log_callback=self.log_message,
-            deepgram_key=self.deepgram_key_var.get().strip()
+            deepgram_keys=self._get_deepgram_keys(),
+            highlight_callback=lambda p: self.after(0, self._highlight_video, p),
+            split_sentences=self.split_sentences_var.get()
         )
         threading.Thread(target=self._process_thread, daemon=True).start()
 
@@ -534,6 +610,7 @@ class App(ctk.CTk):
         self.is_running = False
         self.progress_bar.set(1)
         self.progress_label.configure(text="100%  ✅ Готово")
+        self.current_processing_path = None
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
         self.btn_select_videos.configure(state="normal")
@@ -553,7 +630,8 @@ class App(ctk.CTk):
             "model_size": self.model_var.get(),
             "use_gpu": self.gpu_var.get(),
             "overwrite": self.overwrite_var.get(),
-            "deepgram_key": self.deepgram_key_var.get(),
+            "deepgram_keys": self._get_deepgram_keys(),
+            "split_sentences": self.split_sentences_var.get(),
             "view_mode": self.view_mode_var.get(),
             "language": self.lang_var.get(),
             "window_geometry": self.geometry(),
@@ -583,8 +661,17 @@ class App(ctk.CTk):
             self.gpu_var.set(data["use_gpu"])
         if data.get("overwrite") is not None:
             self.overwrite_var.set(data["overwrite"])
-        if data.get("deepgram_key"):
-            self.deepgram_key_var.set(data["deepgram_key"])
+        if data.get("deepgram_keys"):
+            keys = data["deepgram_keys"]
+            if isinstance(keys, list):
+                for k in keys:
+                    if k.strip():
+                        self._add_key_row(k.strip())
+            elif isinstance(keys, str) and keys.strip():
+                # Обратная совместимость: старый формат с одним ключом
+                self._add_key_row(keys.strip())
+        if data.get("split_sentences") is not None:
+            self.split_sentences_var.set(data["split_sentences"])
         if data.get("view_mode"):
             self.view_mode_var.set(data["view_mode"])
         if data.get("language"):
@@ -598,6 +685,10 @@ class App(ctk.CTk):
         if self.model_var.get() == "deepgram":
             self.deepgram_frame.pack(fill="x", padx=8, pady=(0,2))
 
+        # Автопроверка баланса при старте, если есть сохранённые ключи
+        if self._get_deepgram_keys():
+            self.after(500, self._auto_check_balances)
+
     def _on_close(self):
         """Сохраняет настройки и закрывает приложение."""
         self._save_config()
@@ -606,6 +697,71 @@ class App(ctk.CTk):
     # ─── Автосохранение при изменении настроек ──────────────────
     def _auto_save(self, *_):
         self._save_config()
+
+    def _on_keys_changed(self):
+        """Автосохранение + авто-проверка баланса с debounce (2 сек)."""
+        if hasattr(self, '_keys_save_after_id'):
+            self.after_cancel(self._keys_save_after_id)
+        self._keys_save_after_id = self.after(2000, self._on_keys_idle)
+
+    def _on_keys_idle(self):
+        """Вызывается через 2 сек после последнего изменения ключей."""
+        self._auto_save()
+        self._auto_check_balances()
+
+    def _auto_check_balances(self):
+        """Автоматически проверяет баланс всех ключей в фоне."""
+        keys = self._get_deepgram_keys()
+        # Инкрементируем счётчик — устаревшие результаты будут проигнорированы
+        self._balance_check_id += 1
+        check_id = self._balance_check_id
+        # Сбрасываем старые лейблы на «проверка...»
+        for lbl in self.key_balance_labels:
+            if lbl.winfo_exists():
+                lbl.configure(text="⏳", text_color="#94a3b8")
+        if not keys:
+            return
+
+        def _fetch():
+            results = []
+            for key in keys:
+                balance = check_deepgram_balance(key)
+                results.append((key, balance))
+            try:
+                self.after(0, lambda cid=check_id, res=results: self._show_balances_inline(cid, res))
+            except Exception:
+                pass  # окно закрыто — ничего не делаем
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _show_balances_inline(self, check_id: int, results):
+        """Обновляет баланс-лейблы, сопоставляя по значению ключа."""
+        if check_id != self._balance_check_id:
+            return  # устаревший результат — игнорируем
+        # Строим словарь: ключ -> баланс
+        balance_map = {key: bal for key, bal in results}
+        # Обновляем лейблы, сопоставляя по текущему значению Entry
+        for i, entry in enumerate(self.key_entries):
+            if i >= len(self.key_balance_labels):
+                break
+            lbl = self.key_balance_labels[i]
+            if not lbl.winfo_exists() or not entry.winfo_exists():
+                continue
+            key = entry.get().strip()
+            balance = balance_map.get(key)
+            if balance == "free_tier":
+                lbl.configure(text="🔓 Free tier ($200)", text_color="#60a5fa")
+            elif balance:
+                try:
+                    amt = float(balance.replace("$","").split()[0])
+                    color = "#4ade80" if amt > 0 else "#ef4444"
+                except ValueError:
+                    color = "#4ade80"
+                lbl.configure(text=balance, text_color=color)
+            elif balance is None and key:
+                lbl.configure(text="⚠ ошибка", text_color="#ef4444")
+            else:
+                lbl.configure(text="", text_color="#94a3b8")
 
     def stop_processing(self):
         if self.engine and self.is_running:
