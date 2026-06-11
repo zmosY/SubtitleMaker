@@ -65,6 +65,7 @@ class App(_AppBase):
         self.left_panel = ctk.CTkFrame(self.pane)
         self.left_panel.grid_rowconfigure(2, weight=1)
         self.left_panel.grid_columnconfigure(0, weight=1)
+        self.left_panel.grid_columnconfigure(1, weight=0)  # колонка скроллбара — не растягивается
 
         # Заголовок с переключателем режима просмотра
         header_frame = ctk.CTkFrame(self.left_panel, fg_color="transparent")
@@ -90,10 +91,32 @@ class App(_AppBase):
         self.btn_select_videos = ctk.CTkButton(btn_frame, text="📂 Выбрать видео...", command=self.select_files, height=32)
         self.btn_select_videos.grid(row=0, column=0, padx=0, pady=5, sticky="ew")
 
-        self.videos_scroll = ctk.CTkScrollableFrame(self.left_panel)
-        self.videos_scroll.grid(row=2, column=0, padx=10, pady=(5,10), sticky="nsew")
-        self.videos_scroll.grid_columnconfigure(0, weight=1)
-        self.videos_scroll.bind("<Configure>", self._on_scroll_configure)
+        # Свой scrollable-контейнер: Canvas + CTkFrame + CTkScrollbar
+        self.videos_canvas = tk.Canvas(self.left_panel, highlightthickness=0,
+                                       bg="#2b2b2b")
+        self.videos_canvas.grid(row=2, column=0, padx=10, pady=(5,10), sticky="nsew")
+
+        self.videos_inner = ctk.CTkFrame(self.videos_canvas, fg_color="transparent")
+        self.videos_inner.grid_columnconfigure(0, weight=1)
+
+        self._canvas_window = self.videos_canvas.create_window(
+            (0, 0), window=self.videos_inner, anchor="nw", tags="inner"
+        )
+
+        self.videos_scrollbar = ctk.CTkScrollbar(
+            self.left_panel, command=self.videos_canvas.yview
+        )
+        self.videos_canvas.configure(yscrollcommand=self.videos_scrollbar.set)
+        # Скроллбар скрыт по умолчанию (покажется, когда контент не влезает)
+
+        # Прокрутка колёсиком мыши — только когда курсор над списком видео
+        def _on_mousewheel(event):
+            w = self.winfo_containing(event.x_root, event.y_root)
+            if w and (w == self.videos_canvas or str(w).startswith(str(self.videos_inner))):
+                self.videos_canvas.yview_scroll(-1 * (event.delta // 120), "units")
+        self.bind_all("<MouseWheel>", _on_mousewheel, add="+")
+
+        self.videos_canvas.bind("<Configure>", self._on_canvas_configure)
 
         if _DND_AVAILABLE:
             # Drag & drop hint (видна когда нет видео)
@@ -106,8 +129,8 @@ class App(_AppBase):
             # Регистрируем зоны для Drag & Drop
             self.drop_target_register(DND_FILES)
             self.dnd_bind('<<Drop>>', self._on_drop)
-            self.videos_scroll.drop_target_register(DND_FILES)
-            self.videos_scroll.dnd_bind('<<Drop>>', self._on_drop)
+            self.videos_canvas.drop_target_register(DND_FILES)
+            self.videos_canvas.dnd_bind('<<Drop>>', self._on_drop)
             # DragEnter/DragLeave для визуальной подсветки (окно целиком)
             self.dnd_bind('<<DragEnter>>', self._on_drag_enter)
             self.dnd_bind('<<DragLeave>>', self._on_drag_leave)
@@ -118,7 +141,7 @@ class App(_AppBase):
         self.right_panel.grid_rowconfigure(2, weight=1)
         self.right_panel.grid_columnconfigure(0, weight=1)
 
-        self.preview_title = ctk.CTkLabel(self.right_panel, text="📝 Предпросмотр", font=ctk.CTkFont(size=14, weight="bold"))
+        self.preview_title = ctk.CTkLabel(self.right_panel, text="📝 Субтитры", font=ctk.CTkFont(size=14, weight="bold"))
         self.preview_title.grid(row=0, column=0, padx=10, pady=(10,5), sticky="w")
 
         lang_frame = ctk.CTkFrame(self.right_panel, fg_color="transparent")
@@ -129,7 +152,7 @@ class App(_AppBase):
         self.copy_btn = ctk.CTkButton(lang_frame, text="📋 Копировать", command=self._copy_subtitle, width=100, height=28, fg_color="#28a745")
         self.copy_btn.pack(side="right")
 
-        self.preview_box = ctk.CTkTextbox(self.right_panel, state="disabled", font=ctk.CTkFont(family="Consolas", size=10))
+        self.preview_box = ctk.CTkTextbox(self.right_panel, state="disabled", font=ctk.CTkFont(family="Consolas", size=14))
         self.preview_box.grid(row=2, column=0, padx=10, pady=(5,10), sticky="nsew")
 
         # --- Нижняя панель: прогресс + кнопки + доп.настройки ---
@@ -291,6 +314,22 @@ class App(_AppBase):
         else:
             self.drop_hint.place(relx=0.5, rely=0.55, anchor="center")
 
+    def _update_scrollbar(self):
+        """Показывает скроллбар, только если контент не помещается в canvas."""
+        def _check():
+            try:
+                inner_h = self.videos_inner.winfo_reqheight()
+                canvas_h = self.videos_canvas.winfo_height()
+                if inner_h > canvas_h + 8:
+                    self.videos_scrollbar.grid(row=2, column=1, sticky="ns", padx=(0, 10), pady=(5, 10))
+                    self.videos_canvas.configure(yscrollcommand=self.videos_scrollbar.set)
+                else:
+                    self.videos_scrollbar.grid_remove()
+                    self.videos_canvas.yview_moveto(0)
+            except Exception:
+                pass
+        self.after(100, _check)
+
     def _add_video_item(self, video_path: str):
         path = Path(video_path)
         has_srt = get_srt_path(video_path, "ru").exists() or get_srt_path(video_path, "en").exists()
@@ -300,10 +339,11 @@ class App(_AppBase):
             self._add_video_card(video_path, path, has_srt)
         else:
             self._add_video_row(video_path, path, has_srt)
+        self._update_scrollbar()
 
     def _add_video_row(self, video_path: str, path: Path, has_srt: bool):
         """Компактный элемент для режима списка."""
-        item = ctk.CTkFrame(self.videos_scroll, fg_color="transparent", border_width=1, border_color="#3a3a3a")
+        item = ctk.CTkFrame(self.videos_inner, fg_color="transparent", border_width=1, border_color="#3a3a3a")
         item.grid_columnconfigure(0, weight=1)
         item.pack(fill="x", pady=2, padx=5)
         def on_click():
@@ -321,6 +361,7 @@ class App(_AppBase):
             if self.selected_video_path == video_path:
                 self._clear_preview()
             self._update_drop_hint()
+            self._update_scrollbar()
         ctk.CTkButton(item, text="✕", command=remove, width=25, height=25, fg_color="#ef4444", hover_color="#dc2626").grid(row=0, column=2, padx=(5,0))
         self.video_widgets[video_path] = item
 
@@ -330,7 +371,7 @@ class App(_AppBase):
 
     def _add_video_card(self, video_path: str, path: Path, has_srt: bool):
         """Плитка с превью для режима предпросмотра (grid-сетка)."""
-        tile = ctk.CTkFrame(self.videos_scroll, fg_color="#1e1e1e",
+        tile = ctk.CTkFrame(self.videos_inner, fg_color="#1e1e1e",
                             border_width=1, border_color="#3a3a3a", corner_radius=8)
 
         def on_click():
@@ -373,6 +414,7 @@ class App(_AppBase):
                 self._clear_preview()
             self._reflow_tiles()
             self._update_drop_hint()
+            self._update_scrollbar()
         rm_btn = ctk.CTkButton(
             thumb_holder, text="✕", command=remove,
             width=22, height=22, fg_color="#cc3333", hover_color="#ff4444",
@@ -403,7 +445,7 @@ class App(_AppBase):
             return
 
         # Вычисляем число колонок по доступной ширине
-        avail_w = self.videos_scroll.winfo_width() - 20  # отступы
+        avail_w = self.videos_canvas.winfo_width() - 20  # отступы
         tile_step = self._TILE_W + self._TILE_GAP * 2
         cols = max(1, avail_w // tile_step)
 
@@ -413,15 +455,20 @@ class App(_AppBase):
 
         # Настраиваем колонки с равным весом
         for c in range(cols):
-            self.videos_scroll.grid_columnconfigure(c, weight=1, uniform="tile")
+            self.videos_inner.grid_columnconfigure(c, weight=1, uniform="tile")
         for i, tile in enumerate(tiles):
             row = i // cols
             col = i % cols
             tile.grid(row=row, column=col, padx=self._TILE_GAP // 2,
                       pady=self._TILE_GAP // 2, sticky="nsew")
+        self._update_scrollbar()
 
-    def _on_scroll_configure(self, event):
-        """Перекомпоновка плиток при изменении размера."""
+    def _on_canvas_configure(self, event):
+        """Подгоняет ширину внутреннего фрейма под canvas + перекомпоновка плиток."""
+        canvas_w = event.width
+        self.videos_canvas.itemconfig(self._canvas_window, width=canvas_w)
+        self.videos_canvas.configure(scrollregion=self.videos_canvas.bbox("all"))
+        self._update_scrollbar()
         if self.view_mode_var.get() == "👁️ Превью":
             self._reflow_tiles()
 
@@ -505,7 +552,7 @@ class App(_AppBase):
     )
 
     def _clear_preview(self):
-        self.preview_title.configure(text="📝 Предпросмотр")
+        self.preview_title.configure(text="📝 Субтитры")
         self.preview_box.configure(state="normal")
         self.preview_box.delete("1.0", "end")
         self.preview_box.insert("1.0", self._EMPTY_PREVIEW_TEXT)
@@ -514,7 +561,7 @@ class App(_AppBase):
     def _on_view_mode_changed(self, value):
         """Переключает режим отображения списка видео (превью всегда видно)."""
         # Очищаем и пересоздаём элементы списка
-        for w in self.videos_scroll.winfo_children():
+        for w in self.videos_inner.winfo_children():
             w.destroy()
         self.video_widgets.clear()
         for v in self.files_to_process:
@@ -525,6 +572,7 @@ class App(_AppBase):
         # Восстанавливаем подсветку обрабатываемого видео
         if self.current_processing_path and self.is_running:
             self._highlight_video(self.current_processing_path)
+        self._update_scrollbar()
     
     def _apply_view_mode_layout(self, mode_value=None):
         """Применяет текущий режим отображения к интерфейсу.
@@ -583,6 +631,7 @@ class App(_AppBase):
                         count += 1
                 self.log_message(f"Найдено видео в папке: {count}")
         self._reflow_tiles()
+        self._update_scrollbar()
 
     def _on_model_changed(self, choice: str):
         """Показывает/скрывает Deepgram-поле при выборе модели."""
@@ -718,7 +767,7 @@ class App(_AppBase):
         self.current_processing_path = None
         self.btn_run.configure(text="▶ Старт", fg_color="#16a34a", hover_color="#15803d")
         self.btn_select_videos.configure(state="normal")
-        for w in self.videos_scroll.winfo_children():
+        for w in self.videos_inner.winfo_children():
             w.destroy()
         self.video_widgets.clear()
         for v in self.files_to_process:
